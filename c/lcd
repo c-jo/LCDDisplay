@@ -1,0 +1,124 @@
+/* lcd.c - ILI9341 control: reset, init table, address window, and the
+ * per-frame sprite -> DMA buffer -> SPI update. Ported from
+ * PROClcdReset / PROClcdSetup / PROClcdSendInitData / PROCsetWindow /
+ * PROClcdUpdate in source.txt.
+ */
+
+#include <stdlib.h>
+#include "kernel.h"
+
+#include "spiscreen.h"
+#include "asm.h"
+#include "lcd.h"
+
+/* ILI9341 initialisation table. Each entry is a command byte followed by
+ * its parameter bytes (stored one-per-word, since spi_send reads whole
+ * 32-bit words out of memory for each byte it clocks out - only the low
+ * 8 bits of each word are meaningful). This is a straightforward
+ * restructuring of the RESTORE/READ-driven DATA table from
+ * PROClcdSetup/PROClcdSendInitData; the command bytes and parameter
+ * values are unchanged.
+ */
+typedef struct {
+    int cmd;
+    int nparams;
+    int params[16];
+} lcd_init_cmd_t;
+
+static const lcd_init_cmd_t lcd_init_table[] = {
+    { 0x36, 1,  { 0x00 } },
+    { 0x3A, 1,  { 0x05 } },
+    { 0x31, 0,  { 0 } },
+    { 0x2A, 4,  { 0x00, 0x00, 0x01, 0x3F } },
+    { 0x2B, 4,  { 0x00, 0x00, 0x00, 0xEF } },
+    { 0xB2, 5,  { 0x0C, 0x0C, 0x00, 0x33, 0x33 } },
+    { 0xB7, 1,  { 0x35 } },
+    { 0xBB, 1,  { 0x1F } },
+    { 0xC0, 1,  { 0x2C } },
+    { 0xC2, 1,  { 0x01 } },
+    { 0xC3, 1,  { 0x12 } },
+    { 0xC4, 1,  { 0x20 } },
+    { 0xC6, 1,  { 0x2F } },
+    { 0xD0, 2,  { 0xA4, 0xA1 } },
+    { 0xE0, 14, { 0xD0, 0x08, 0x11, 0x08, 0x0C, 0x15, 0x39, 0x33,
+                  0x50, 0x36, 0x13, 0x14, 0x29, 0x2D } },
+    { 0xE1, 14, { 0xD0, 0x08, 0x10, 0x08, 0x06, 0x06, 0x39, 0x44,
+                  0x51, 0x0B, 0x16, 0x14, 0x2F, 0x31 } },
+    { 0x21, 0,  { 0 } },
+    { 0x11, 0,  { 0 } },
+};
+
+#define LCD_INIT_TABLE_LEN (sizeof(lcd_init_table) / sizeof(lcd_init_table[0]))
+
+void spiscreen_spi(spiscreen_ws *ws, int cmd, const void *start, const void *end)
+{
+    spi_send(cmd, start, end, &ws->hw);
+}
+
+void lcd_reset(spiscreen_ws *ws)
+{
+    // spiscreen_gpio_write_data(ws, PIN_BL, 0);
+    spiscreen_gpio_write_data(ws, PIN_CS, 1);
+    spiscreen_sleep(1);         /* 0.010s */
+    spiscreen_gpio_write_data(ws, PIN_RST, 1);
+    spiscreen_sleep(1);          /* 0.005s -> rounds to 1 centisecond */
+    spiscreen_gpio_write_data(ws, PIN_RST, 0);
+    spiscreen_sleep(2);          /* 0.020s */
+    spiscreen_gpio_write_data(ws, PIN_RST, 1);
+    spiscreen_sleep(15);         /* 0.150s */
+    spiscreen_gpio_write_data(ws, PIN_CS, 0);
+    //spiscreen_gpio_write_data(ws, PIN_BL, 1);
+}
+
+_kernel_oserror *lcd_setup(spiscreen_ws *ws)
+{
+    unsigned int i;
+
+    for (i = 0; i < LCD_INIT_TABLE_LEN; i++) {
+        const lcd_init_cmd_t *e = &lcd_init_table[i];
+
+        spiscreen_spi(ws, e->cmd, e->params, e->params + e->nparams);
+    }
+
+    spiscreen_sleep(50);         /* 0.5s */
+    spiscreen_spi(ws, 0x29, ws->scratch, ws->scratch); /* Display ON, no data */
+
+    return NULL;
+}
+
+_kernel_oserror *lcd_set_window(spiscreen_ws *ws, int x0, int y0, int x1, int y1)
+{
+    int *scratch = (int *) ws->scratch;
+
+    /* NOTE: command bytes 0x2B/0x2C below are an unmodified port of the
+     * original PROCsetWindow (source.txt lines 487-499). */
+    scratch[0] = (x0 >> 8) & 0xFF;
+    scratch[1] = x0 & 0xFF;
+    scratch[2] = (x1 >> 8) & 0xFF;
+    scratch[3] = x1 & 0xFF;
+    spiscreen_spi(ws, 0x2B, scratch, scratch + 4);
+
+    scratch[0] = (y0 >> 8) & 0xFF;
+    scratch[1] = y0 & 0xFF;
+    scratch[2] = (y1 >> 8) & 0xFF;
+    scratch[3] = y1 & 0xFF;
+    spiscreen_spi(ws, 0x2C, scratch, scratch + 4);
+
+    return NULL;
+}
+
+void lcd_update(spiscreen_ws *ws)
+{
+    const unsigned char *src = (const unsigned char *) ws->spriteptr + 44;
+    unsigned char *dma = (unsigned char *) ws->dmabuffer;
+    int y;
+
+    for (y = 0; y <= 0x778; y += 8) {
+        void *dst_start = dma + y + 0x95880;
+        const void *dst_threshold = dma + y;
+
+        src = (const unsigned char *) lcd_lineblt(src, dst_start, dst_threshold);
+    }
+
+    spiscreen_spi(ws, 0x2c, dma, dma + DMA_BUFFER_SIZE);
+}

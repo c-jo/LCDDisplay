@@ -1,0 +1,82 @@
+/* spiscreen.h - shared workspace/constants for the SPIScreen module
+ *
+ * Ported from the original BBC BASIC + inline ARM assembler prototype
+ * (source.txt). Phase 1 of the conversion keeps the register-level SPI/GPIO
+ * work in ObjAsm (see s/spiasm) and moves everything else into C.
+ */
+#ifndef SPISCREEN_H
+#define SPISCREEN_H
+
+#include "kernel.h"
+
+/* Physical register bases, mapped once at Init via OS_Memory reason 13 */
+#define GPIO_PHYS_BASE   0xFE200000u
+#define SPI_PHYS_BASE    0xFE204000u
+#define GPIO_SPI_MAP_SIZE 0x100
+
+/* GPIO pin assignments (BCM numbering) - board specific, see instructions */
+#define PIN_CS   8
+#define PIN_BL   18
+#define PIN_DC   25
+#define PIN_RST  27
+
+/* SPI0 clock divider */
+#define SPI_CLOCK_DIV 32
+
+/* Panel geometry - the module only supports this exact configuration */
+#define SCREEN_WIDTH  320
+#define SCREEN_HEIGHT 240
+
+/* Sprite mode word required for a directly-displayable sprite: 16bpp,
+ * new-style mode word, as produced by the original DIM'd sprite
+ * (mode &78A04001 in source.txt). Sprites loaded via the star command
+ * must match this exactly or they are rejected. */
+#define REQUIRED_SPRITE_MODE 0x78A04001
+
+/* 320 * 240 * 16bpp pixel data + 44 byte sprite header + 16 byte area header
+ * = 153660, round up  */
+#define SPRITE_AREA_SIZE 163840
+
+/* 320 * 240 * 16bpp expanded to 32-bit words for the SPI DMA staging buffer */
+#define DMA_BUFFER_SIZE 614400
+
+/* Small scratch buffer used for building short SPI command sequences
+ * (replaces the BASIC "code%" scratchpad). */
+#define SCRATCH_SIZE 64
+
+/* Pair of mapped register bases, passed to the ObjAsm routines */
+typedef struct hw_regs {
+    void *gpio_base;
+    void *spi_base;
+} hw_regs_t;
+
+/* Module workspace - one instance, pointed to by the module's private word */
+typedef struct spiscreen_workspace {
+    hw_regs_t hw;
+
+    int swi_setgcol;                /* ColourTrans_SetGCOL SWI number */
+    int swi_getcolournumber;        /* ColourTrans_ReturnColourNumber SWI number */
+    int swi_gpio_writemode;         /* GPIO_WriteMode SWI number (external module) */
+    int swi_gpio_writedata;         /* GPIO_WriteData SWI number (external module) */
+
+    void *spritearea;               /* single-sprite sprite area (owned buffer) */
+    void *spriteptr;                /* -> sprite control block within spritearea */
+    void *dmabuffer;                /* DMA staging buffer for SPI transfer */
+
+    unsigned char scratch[SCRATCH_SIZE];
+} spiscreen_ws;
+
+/* Shared helpers, implemented in c/gpio.c */
+_kernel_oserror *spiscreen_gpio_write_mode(spiscreen_ws *ws, int pin, int value);
+_kernel_oserror *spiscreen_gpio_write_data(spiscreen_ws *ws, int pin, int value);
+void spiscreen_sleep(int centiseconds);
+
+/* Implemented in c/module.c */
+extern spiscreen_ws *spiscreen_workspace;
+void spiscreen_reset_spritearea(spiscreen_ws *ws);
+
+/* Implemented in c/command.c - the *SPIScreenLoad handler named by the
+ * command-keyword-table directive in cmhg/SPIScreen */
+_kernel_oserror *spiscreen_command(const char *arg_string, int argc, int cmd_no, void *pw);
+
+#endif /* SPISCREEN_H */

@@ -1,0 +1,23 @@
+; SPIScreen.cmhg - CMHG module header.
+;
+; Defines module identity/help text, the initialisation/finalisation
+; entry points (c/module.c), and the single *SPIScreenLoad star command
+; (c/command.c) which replaces the original BASIC program's demo code:
+; it loads a sprite file and displays it on the panel, refusing anything
+; that isn't exactly a 320x240 sprite in the panel's native 16bpp mode.
+
+#include "VersionNum"
+
+initialisation-code: module_init
+finalisation-code: module_final
+
+title-string: SPIScreen
+help-string: SPIScreen Module_FullVersion_CMHG
+
+command-keyword-table: spiscreen_command
+    SPIScreenLoad(min-args: 1, max-args: 1,
+                  invalid-syntax: "Syntax: *SPIScreenLoad <sprite file>",
+                  help-text: "*SPIScreenLoad <sprite file>\n\
+Loads <sprite file> and displays it on the SPI LCD panel. The file must\n\
+contain exactly one sprite, 320x240 pixels, in the panel's native 16bpp\n\
+mode - anything else is rejected with an error.")

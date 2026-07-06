@@ -1,0 +1,205 @@
+/* module.c - module lifetime: initialisation, finalisation, and the
+ * hardware bring-up that was previously done at the top level of the
+ * BASIC program (buffer allocation, GPIO/SPI register mapping, resolving
+ * SWI numbers, and PROCinitGPIO).
+ *
+ * The module keeps a single, static workspace instance (spiscreen_ws) -
+ * this mirrors the original program's single set of global variables and
+ * keeps things simple, since the hardware this module drives is a single
+ * physical SPI LCD; the module is not designed to be multiply
+ * instantiated.
+ */
+
+#include <string.h>
+#include "kernel.h"
+#include "swis.h"
+
+#include "spiscreen.h"
+#include "asm.h"
+#include "lcd.h"
+
+#include "SPIScreenHdr.h"
+
+/* GPIO_WriteMode/GPIO_WriteData live in a separate GPIO support module and
+ * are not part of the fixed SWI number space, so (as the original BASIC
+ * code relied on SYS's automatic name lookup) we must resolve their SWI
+ * numbers ourselves via OS_SWINumberFromString. */
+#define GPIO_WRITEMODE_NAME "GPIO_WriteMode"
+#define GPIO_WRITEDATA_NAME "GPIO_WriteData"
+
+spiscreen_ws *spiscreen_workspace = NULL;
+
+static _kernel_oserror *swi_number_from_string(const char *name, int *swi_no)
+{
+    _kernel_oserror *e;
+    _kernel_swi_regs r;
+
+    r.r[1] = (int) name;
+    e = _kernel_swi(OS_SWINumberFromString, &r, &r);
+    if (e != NULL)
+        return e;
+
+    *swi_no = r.r[0];
+    return NULL;
+}
+
+/* Thin wrappers around OS_Module 6/7 (Claim/Free) - used instead of
+ * malloc()/free() so the module doesn't depend on the C library heap
+ * being wired up for RMA use. */
+static _kernel_oserror *claim_memory(int size, void **out)
+{
+    _kernel_oserror *e;
+    _kernel_swi_regs r;
+
+    r.r[0] = 6;
+    r.r[3] = size;
+    e = _kernel_swi(OS_Module, &r, &r);
+    if (e != NULL)
+        return e;
+
+    *out = (void *) r.r[2];
+    return NULL;
+}
+
+static void free_memory(void *ptr)
+{
+    _kernel_swi_regs r;
+
+    if (ptr == NULL)
+        return;
+
+    r.r[0] = 7;
+    r.r[2] = (int) ptr;
+    (void) _kernel_swi(OS_Module, &r, &r);
+}
+
+/* Map the GPIO and SPI0 peripheral registers into the module's address
+ * space, as PROCinitGPIO's "SYS OS_Memory,13,..." calls did. */
+static _kernel_oserror *map_registers(spiscreen_ws *ws)
+{
+    _kernel_oserror *e;
+    _kernel_swi_regs r;
+
+    r.r[0] = 13;
+    r.r[1] = (int) GPIO_PHYS_BASE;
+    r.r[2] = GPIO_SPI_MAP_SIZE;
+    e = _kernel_swi(OS_Memory, &r, &r);
+    if (e != NULL)
+        return e;
+    ws->hw.gpio_base = (void *) r.r[3];
+
+    r.r[0] = 13;
+    r.r[1] = (int) SPI_PHYS_BASE;
+    r.r[2] = GPIO_SPI_MAP_SIZE;
+    e = _kernel_swi(OS_Memory, &r, &r);
+    if (e != NULL)
+        return e;
+    ws->hw.spi_base = (void *) r.r[3];
+
+    return NULL;
+}
+
+/* Create a fresh, empty, single-sprite sprite area of exactly the size
+ * required for one 320x240 16bpp sprite (matches the original DIM'd
+ * spritearea% initialisation). */
+void spiscreen_reset_spritearea(spiscreen_ws *ws)
+{
+    int *area = (int *) ws->spritearea;
+
+    memset(ws->spritearea, 0x00, SPRITE_AREA_SIZE);
+
+    area[0] = SPRITE_AREA_SIZE;   /* total area size */
+    area[1] = 0;                  /* number of sprites */
+    area[2] = 16;                 /* offset to first sprite */
+    area[3] = 16;                 /* offset to first free word */
+}
+
+_kernel_oserror *module_init(const char *cmd_tail, int podule_base, void *pw)
+{
+    _kernel_oserror *e;
+    spiscreen_ws *ws;
+
+    (void) cmd_tail;
+    (void) podule_base;
+    (void) pw;
+
+    e = claim_memory(sizeof(*ws), (void **) &ws);
+    if (e != NULL)
+        return e;
+    memset(ws, 0, sizeof(*ws));
+    spiscreen_workspace = ws;
+
+    ws->swi_setgcol = ColourTrans_SetGCOL;
+    ws->swi_getcolournumber = ColourTrans_ReturnColourNumber;
+
+    e = swi_number_from_string(GPIO_WRITEMODE_NAME, &ws->swi_gpio_writemode);
+    if (e != NULL)
+        goto fail;
+    e = swi_number_from_string(GPIO_WRITEDATA_NAME, &ws->swi_gpio_writedata);
+    if (e != NULL)
+        goto fail;
+
+    e = claim_memory(SPRITE_AREA_SIZE, &ws->spritearea);
+    if (e != NULL)
+        goto fail;
+    e = claim_memory(DMA_BUFFER_SIZE, &ws->dmabuffer);
+    if (e != NULL)
+        goto fail;
+
+    spiscreen_reset_spritearea(ws);
+    ws->spriteptr = (char *) ws->spritearea + 16;
+
+    e = map_registers(ws);
+    if (e != NULL)
+        goto fail;
+
+    gpio_hw_init(&ws->hw);
+    spiscreen_gpio_write_data(ws, PIN_BL, 0);
+
+    e = spiscreen_gpio_write_mode(ws, PIN_CS, 1);
+    if (e == NULL)
+        e = spiscreen_gpio_write_data(ws, PIN_BL, 1);
+    if (e == NULL)
+        e = spiscreen_gpio_write_mode(ws, PIN_DC, 1);
+    if (e == NULL)
+        e = spiscreen_gpio_write_mode(ws, PIN_RST, 1);
+    if (e != NULL)
+        goto fail;
+
+    lcd_reset(ws);
+    e = lcd_setup(ws);
+    if (e != NULL)
+        goto fail;
+    e = lcd_set_window(ws, 0, 0, SCREEN_WIDTH - 1, SCREEN_HEIGHT - 1);
+    if (e != NULL)
+        goto fail;
+
+    memset((char*)ws->spriteptr+44, 0, 320*240*2);
+    lcd_update(ws);
+    spiscreen_gpio_write_data(ws, PIN_BL, 1);
+
+    return NULL;
+
+fail:
+    module_final(1, podule_base, pw);
+    return e;
+}
+
+_kernel_oserror *module_final(int fatal, int podule_base, void *pw)
+{
+    spiscreen_ws *ws = spiscreen_workspace;
+
+    (void) fatal;
+    (void) podule_base;
+    (void) pw;
+
+    if (ws == NULL)
+        return NULL;
+
+    free_memory(ws->dmabuffer);
+    free_memory(ws->spritearea);
+    free_memory(ws);
+
+    spiscreen_workspace = NULL;
+    return NULL;
+}

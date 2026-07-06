@@ -1,0 +1,35 @@
+/* asm.h - C declarations for the ObjAsm entry points in s/spiasm */
+#ifndef SPISCREEN_ASM_H
+#define SPISCREEN_ASM_H
+
+#include "spiscreen.h"
+
+/* Send one command byte (D/C low) followed by the data words in
+ * [start,end) (D/C high) over SPI0, using the register-level bit-banged
+ * FIFO loop from the original spiSend assembler routine.
+ *   cmd   - command byte
+ *   start - -> first 32-bit word of data
+ *   end   - -> one past the last 32-bit word of data
+ *   hw    - mapped GPIO/SPI register bases
+ */
+extern void spi_send(int cmd, const void *start, const void *end,
+                      const hw_regs_t *hw);
+
+/* Expand one row of 16bpp packed pixel data (pointed to by src) into the
+ * byte-per-word DMA staging buffer, writing interleaved high/low bytes
+ * working down from dst_start to dst_threshold. Direct port of the
+ * original "lineblt" routine.
+ *
+ * Returns the advanced source pointer (mirrors the original code, which
+ * left the auto-incremented source pointer in r0/A% so that repeated
+ * BASIC "A%=USR lineblt" calls could chain across rows without the
+ * caller having to track the offset itself). */
+extern const void *lcd_lineblt(const void *src, void *dst_start,
+                                const void *dst_threshold);
+
+/* Configure GPIO alternate functions and the SPI0 CS/clock divider
+ * register. Direct port of the assembler half of PROCinitGPIO
+ * (the GPIO_WriteMode/GPIO_WriteData SWI calls remain in C). */
+extern void gpio_hw_init(const hw_regs_t *hw);
+
+#endif /* SPISCREEN_ASM_H */

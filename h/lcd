@@ -1,0 +1,29 @@
+/* lcd.h - LCD control built on top of the ObjAsm spi_send/lineblt/gpio_hw_init
+ * primitives: panel reset, ILI9341 init table, address-window setup, and
+ * the sprite-to-DMA-buffer frame update.
+ */
+#ifndef SPISCREEN_LCD_H
+#define SPISCREEN_LCD_H
+
+#include "kernel.h"
+#include "spiscreen.h"
+
+/* Send one command byte followed by the (int-per-byte, word-spaced) data
+ * words in [start,end). Thin wrapper around spi_send binding in ws->hw. */
+void spiscreen_spi(spiscreen_ws *ws, int cmd, const void *start, const void *end);
+
+/* Panel reset sequence (GPIO pulses + delays) - port of PROClcdReset. */
+void lcd_reset(spiscreen_ws *ws);
+
+/* Send the ILI9341 initialisation command table and turn the display on -
+ * port of PROClcdSetup/PROClcdSendInitData. */
+_kernel_oserror *lcd_setup(spiscreen_ws *ws);
+
+/* Set the ILI9341 column/row address window - port of PROCsetWindow. */
+_kernel_oserror *lcd_set_window(spiscreen_ws *ws, int x0, int y0, int x1, int y1);
+
+/* Convert the current sprite (ws->spriteptr) into the DMA buffer and
+ * stream it to the panel - port of PROClcdUpdate. */
+void lcd_update(spiscreen_ws *ws);
+
+#endif /* SPISCREEN_LCD_H */

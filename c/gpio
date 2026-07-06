@@ -1,0 +1,41 @@
+/* gpio.c - small SWI wrappers shared by module.c and lcd.c:
+ *   - GPIO_WriteMode / GPIO_WriteData (resolved at Init time, see module.c)
+ *   - a busy-wait sleep using OS_ReadMonotonicTime, replacing the
+ *     original PROCsleep's "t%=d*100+TIME:REPEAT:UNTIL TIME>=t%" loop.
+ */
+
+#include "kernel.h"
+#include "swis.h"
+
+#include "spiscreen.h"
+
+_kernel_oserror *spiscreen_gpio_write_mode(spiscreen_ws *ws, int pin, int value)
+{
+    _kernel_swi_regs r;
+
+    r.r[0] = pin;
+    r.r[1] = value;
+    return _kernel_swi(ws->swi_gpio_writemode, &r, &r);
+}
+
+_kernel_oserror *spiscreen_gpio_write_data(spiscreen_ws *ws, int pin, int value)
+{
+    _kernel_swi_regs r;
+
+    r.r[0] = pin;
+    r.r[1] = value;
+    return _kernel_swi(ws->swi_gpio_writedata, &r, &r);
+}
+
+void spiscreen_sleep(int centiseconds)
+{
+    _kernel_swi_regs r;
+    int target;
+
+    (void) _kernel_swi(OS_ReadMonotonicTime, &r, &r);
+    target = r.r[0] + centiseconds;
+
+    do {
+        (void) _kernel_swi(OS_ReadMonotonicTime, &r, &r);
+    } while (r.r[0] < target);
+}
