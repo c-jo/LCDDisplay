@@ -1,17 +1,18 @@
-/* command.c - the *SPIScreenLoad star command: load a sprite file into a
- * fresh single-sprite area and, if (and only if) it is exactly a
- * 320x240 sprite in the panel's native 16bpp mode, display it. Replaces
- * the BASIC program's demo/test routines (PROCtest/PROCtest2/
- * PROCvduLcdSprite) with a real "load an image and show it" command.
+/* command.c - the *SPIScreenLoad / *SPIScreenOff / *SPIScreenOn star command
+ * surface. *SPIScreenLoad loads a sprite file into a fresh single-sprite
+ * area and, if (and only if) it is exactly a 320x240 sprite in the
+ * panel's native 16bpp mode, displays it. The backlight commands map to
+ * the panel's BL GPIO, with *SPIScreenOn refusing to light a panel that
+ * has not yet had a real image loaded.
  */
 
 #include <string.h>
-#include <stdio.h>
 #include "kernel.h"
 #include "swis.h"
 
 #include "spiscreen.h"
 #include "lcd.h"
+#include "SPIScreenHdr.h"
 
 /* OS_SpriteOp reason codes used here (see PRM 5a-90ff):
  *   9   ReadSpriteInfo   - width/height (pixels), mask flag, mode word
@@ -30,18 +31,11 @@ static _kernel_oserror *spiscreen_make_error(const char *text)
     return &spiscreen_error;
 }
 
-_kernel_oserror *spiscreen_command(const char *arg_string, int argc, int cmd_no, void *pw)
+static _kernel_oserror *spiscreen_load(const char *arg_string, int argc, spiscreen_ws *ws)
 {
-    spiscreen_ws *ws = spiscreen_workspace;
     _kernel_oserror *e;
     _kernel_swi_regs r;
     int width, height, mode;
-
-    (void) cmd_no;
-    (void) pw;
-
-    if (ws == NULL)
-        return spiscreen_make_error("SPIScreen has not initialised correctly");
 
     if (argc < 1 || arg_string == NULL || arg_string[0] == '\0')
         return spiscreen_make_error("Syntax: *SPIScreenLoad <sprite file>");
@@ -50,6 +44,7 @@ _kernel_oserror *spiscreen_command(const char *arg_string, int argc, int cmd_no,
      * sprite - if the file doesn't fit (too big, or more than one
      * sprite's worth of data) OS_SpriteOp will report E_Overflow. */
     spiscreen_reset_spritearea(ws);
+    ws->image_loaded = 0;
 
     r.r[0] = SPRITEOP_LOADFILE;
     r.r[1] = (int) ws->spritearea;
@@ -87,8 +82,36 @@ _kernel_oserror *spiscreen_command(const char *arg_string, int argc, int cmd_no,
 
     /* offset to first sprite is area word 2 (see spiscreen_reset_spritearea) */
     ws->spriteptr = (char *) ws->spritearea + ((int *) ws->spritearea)[2];
+    ws->image_loaded = 1;
 
     lcd_update(ws);
 
     return NULL;
+}
+
+_kernel_oserror *spiscreen_command(const char *arg_string, int argc, int cmd_no, void *pw)
+{
+    spiscreen_ws *ws = spiscreen_workspace;
+
+    (void) pw;
+
+    if (ws == NULL)
+        return spiscreen_make_error("SPIScreen has not initialised correctly");
+
+    switch (cmd_no) {
+    case CMD_SPIScreenLoad:
+        return spiscreen_load(arg_string, argc, ws);
+
+    case CMD_SPIScreenOff:
+        return lcd_set_backlight(ws, 0);
+
+    case CMD_SPIScreenOn:
+        if (!ws->image_loaded)
+            return spiscreen_make_error(
+                "No image has been loaded - use *SPIScreenLoad first");
+        return lcd_set_backlight(ws, 1);
+
+    default:
+        return spiscreen_make_error("Unknown SPIScreen command");
+    }
 }

@@ -35,7 +35,7 @@ o.SPIScreenHdr: cmhg.SPIScreen VersionNum
 h.SPIScreenHdr: cmhg.SPIScreen VersionNum
 	$(CMHG) cmhg.SPIScreen -d h.SPIScreenHdr $(CMHGFLAGS)
 
-o.module: c.module h.spiscreen h.asm h.lcd
+o.module: c.module h.spiscreen h.asm h.lcd h.SPIScreenHdr
 	$(CC) $(CFLAGS) -o o.module c.module
 
 o.gpio: c.gpio h.spiscreen
@@ -44,7 +44,7 @@ o.gpio: c.gpio h.spiscreen
 o.lcd: c.lcd h.spiscreen h.asm h.lcd
 	$(CC) $(CFLAGS) -o o.lcd c.lcd
 
-o.command: c.command h.spiscreen h.lcd
+o.command: c.command h.spiscreen h.lcd h.SPIScreenHdr
 	$(CC) $(CFLAGS) -o o.command c.command
 
 o.spiasm: s.spiasm

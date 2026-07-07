@@ -9,13 +9,16 @@
 
 #include "spiscreen.h"
 
+#define GPIO_WriteMode 0x58f90
+#define GPIO_WriteData 0x58f81
+
 _kernel_oserror *spiscreen_gpio_write_mode(spiscreen_ws *ws, int pin, int value)
 {
     _kernel_swi_regs r;
 
     r.r[0] = pin;
     r.r[1] = value;
-    return _kernel_swi(ws->swi_gpio_writemode, &r, &r);
+    return _kernel_swi(GPIO_WriteMode, &r, &r);
 }
 
 _kernel_oserror *spiscreen_gpio_write_data(spiscreen_ws *ws, int pin, int value)
@@ -24,7 +27,7 @@ _kernel_oserror *spiscreen_gpio_write_data(spiscreen_ws *ws, int pin, int value)
 
     r.r[0] = pin;
     r.r[1] = value;
-    return _kernel_swi(ws->swi_gpio_writedata, &r, &r);
+    return _kernel_swi(GPIO_WriteData, &r, &r);
 }
 
 void spiscreen_sleep(int centiseconds)

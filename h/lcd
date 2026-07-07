@@ -19,6 +19,9 @@ void lcd_reset(spiscreen_ws *ws);
  * port of PROClcdSetup/PROClcdSendInitData. */
 _kernel_oserror *lcd_setup(spiscreen_ws *ws);
 
+/* Drive the panel backlight GPIO high/low. */
+_kernel_oserror *lcd_set_backlight(spiscreen_ws *ws, int enabled);
+
 /* Set the ILI9341 column/row address window - port of PROCsetWindow. */
 _kernel_oserror *lcd_set_window(spiscreen_ws *ws, int x0, int y0, int x1, int y1);
 

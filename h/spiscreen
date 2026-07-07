@@ -21,7 +21,7 @@
 #define PIN_RST  27
 
 /* SPI0 clock divider */
-#define SPI_CLOCK_DIV 32
+#define SPI_CLOCK_DIV 4
 
 /* Panel geometry - the module only supports this exact configuration */
 #define SCREEN_WIDTH  320
@@ -54,14 +54,10 @@ typedef struct hw_regs {
 typedef struct spiscreen_workspace {
     hw_regs_t hw;
 
-    int swi_setgcol;                /* ColourTrans_SetGCOL SWI number */
-    int swi_getcolournumber;        /* ColourTrans_ReturnColourNumber SWI number */
-    int swi_gpio_writemode;         /* GPIO_WriteMode SWI number (external module) */
-    int swi_gpio_writedata;         /* GPIO_WriteData SWI number (external module) */
-
     void *spritearea;               /* single-sprite sprite area (owned buffer) */
     void *spriteptr;                /* -> sprite control block within spritearea */
     void *dmabuffer;                /* DMA staging buffer for SPI transfer */
+    int image_loaded;               /* true once *SPIScreenLoad has accepted an image */
 
     unsigned char scratch[SCRATCH_SIZE];
 } spiscreen_ws;
@@ -75,8 +71,9 @@ void spiscreen_sleep(int centiseconds);
 extern spiscreen_ws *spiscreen_workspace;
 void spiscreen_reset_spritearea(spiscreen_ws *ws);
 
-/* Implemented in c/command.c - the *SPIScreenLoad handler named by the
- * command-keyword-table directive in cmhg/SPIScreen */
+/* Implemented in c/command.c - the *SPIScreenLoad / *SPIScreenOff /
+ * *SPIScreenOn handler named by the command-keyword-table directive in
+ * cmhg/SPIScreen */
 _kernel_oserror *spiscreen_command(const char *arg_string, int argc, int cmd_no, void *pw);
 
 #endif /* SPISCREEN_H */
