@@ -6,10 +6,9 @@
 ; arguments passed through the A%-F% pseudo-registers. Here they are
 ; ordinary APCS-conforming functions, compiled once into the module, and
 ; called directly from C (see h/asm.h). Register roles have been renumbered
-; onto the standard argument registers r0-r3; the core instruction
-; sequences are otherwise an unmodified port of the original code -
-; including the interleaved-byte "lineblt" trick, whose exact purpose is
-; described in the (currently missing) source_annotated.txt.
+; onto the standard argument registers r0-r3. The SPI and GPIO routines
+; preserve their original instruction sequences; lineblt is adapted for the
+; compact DMA transfer format.
 ;
 ; No hardware register addresses are baked into the code: the GPIO/SPI
 ; register bases are passed in by the caller (via a hw_regs_t*), so this
@@ -21,7 +20,7 @@
         EXPORT  lcd_lineblt
         EXPORT  gpio_hw_init
 
-SPI_CLOCK_DIV   *       32
+SPI_CLOCK_DIV   *       8
 
 ; ---------------------------------------------------------------------
 ; void spi_send(int cmd, const void *start, const void *end,
@@ -52,7 +51,8 @@ spi_send
         ; --- start SPI transfer, flush FIFOs ---
         LDR     r2, [r7, #0]            ; current SPI CS
         AND     r2, r2, #&0c            ; preserve CPHA/CPOL
-        ORR     r2, r2, #&6b0           ; CLEAR_TX|CLEAR_RX|TA|DMAEN|INTD|INTR
+;        ORR     r2, r2, #&6b0           ; CLEAR_TX|CLEAR_RX|TA|DMAEN|INTD|INTR
+        ORR     r2, r2, #&98            ; CLEAR_TX|CLEAR_RX|TA
         STR     r2, [r7, #0]
 
         MCR     p15, 0, r6, c7, c10, 5
@@ -200,38 +200,37 @@ spi_send_endloop
 
 ; ---------------------------------------------------------------------
 ; void lcd_lineblt(const void *src, void *dst_start,
-;                   const void *dst_threshold)
+;                   const void *dst_end)
 ;
 ;   r0 = src           -> source pixel data (16bpp packed, auto-advanced)
-;   r1 = dst_start      -> first destination word, working down in memory
-;   r2 = dst_threshold   -> stop once dst_start has descended to/below this
+;   r1 = dst_start     -> first destination byte
+;   r2 = dst_end       -> one past the final destination byte
 ;
-; Direct register-for-register port of the original "lineblt" routine
-; (r0/"working dst pointer"/r5 map onto r0/r1/r5 here).
+; The original routine expanded each byte into a 32-bit word for its
+; CPU-driven SPI path. DMA writes packed FIFO data, so this replacement
+; keeps the output compact and only performs the required byte swap within
+; each 16bpp pixel.
 ; ---------------------------------------------------------------------
 lcd_lineblt
         STMFD   sp!, {r4, r5}
-        MOV     r5, r2                  ; r5 = dst_threshold
+        MOV     r5, r2                  ; r5 = dst_end
 
 lcd_lineblt_loop
         LDR     r2, [r0], #4            ; r2 = next source word
-        MOV     r4, r2, LSR #8
-        AND     r3, r2, #&ff
-        AND     r4, r4, #&ff
-        STR     r4, [r1], #4
-        STR     r3, [r1], #-&784
+        MOV     r3, r2, LSR #8
+        AND     r3, r3, #&ff            ; first pixel high byte
+        AND     r4, r2, #&ff
+        ORR     r3, r3, r4, LSL #8      ; first pixel low byte
         MOV     r4, r2, LSR #24
-        MOV     r3, r2, LSR #16
+        ORR     r3, r3, r4, LSL #16     ; second pixel high byte
+        MOV     r4, r2, LSR #16
         AND     r4, r4, #&ff
-        AND     r3, r3, #&ff
-        STR     r4, [r1], #4
-        STR     r3, [r1], #-&784
+        ORR     r3, r3, r4, LSL #24     ; second pixel low byte
+        STR     r3, [r1], #4
 
-        CMP     r5, r1
-        BHI     lcd_lineblt_done
-        B       lcd_lineblt_loop
+        CMP     r1, r5
+        BLO     lcd_lineblt_loop
 
-lcd_lineblt_done
         LDMFD   sp!, {r4, r5}
         MOV     pc, lr
 
@@ -273,7 +272,7 @@ gpio_hw_init
         MOV     r2, #7 :SHL: 9
         STR     r2, [r4, #&28]
 
-        MOV     r2, #&3c
+        MOV     r2, #&3C
         STR     r2, [r1, #0]
 
         MOV     r2, #SPI_CLOCK_DIV

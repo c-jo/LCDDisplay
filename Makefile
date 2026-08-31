@@ -18,8 +18,8 @@ OBJASM  = objasm
 CMHG    = cmhg
 LD      = link
 
-CFLAGS    = -c -depend !Depend -IC:,h. -throwback -zM
-AFLAGS    = -depend !Depend -IC:,h. -throwback -APCS 3/32bit -CloseExec
+CFLAGS    = -c -depend !Depend -IC: -throwback -zM
+AFLAGS    = -depend !Depend -IC: -throwback -APCS 3/32bit -CloseExec
 CMHGFLAGS =
 
 OBJS = o.SPIScreenHdr o.module o.gpio o.lcd o.command o.spiasm
@@ -41,7 +41,7 @@ o.module: c.module h.spiscreen h.asm h.lcd h.SPIScreenHdr
 o.gpio: c.gpio h.spiscreen
 	$(CC) $(CFLAGS) -o o.gpio c.gpio
 
-o.lcd: c.lcd h.spiscreen h.asm h.lcd
+o.lcd: c.lcd h.spiscreen h.asm h.lcd h.SPIScreenHdr
 	$(CC) $(CFLAGS) -o o.lcd c.lcd
 
 o.command: c.command h.spiscreen h.lcd h.SPIScreenHdr
@@ -60,3 +60,43 @@ clean:
 	remove SPIScreen
 
 # Dynamic dependencies:
+o.module:	c.module
+o.module:	C:h.kernel
+o.module:	C:h.swis
+o.module:	C:Global.h.OSMisc
+o.module:	h.spiscreen
+o.module:	C:h.kernel
+o.module:	h.asm
+o.module:	h.spiscreen
+o.module:	h.lcd
+o.module:	C:h.kernel
+o.module:	h.spiscreen
+o.module:	h.SPIScreenHdr
+o.gpio:	c.gpio
+o.gpio:	C:h.kernel
+o.gpio:	C:h.swis
+o.gpio:	h.spiscreen
+o.gpio:	C:h.kernel
+o.lcd:	c.lcd
+o.lcd:	C:h.kernel
+o.lcd:	C:h.swis
+o.lcd:	h.spiscreen
+o.lcd:	C:h.kernel
+o.lcd:	h.asm
+o.lcd:	h.spiscreen
+o.lcd:	h.lcd
+o.lcd:	C:h.kernel
+o.lcd:	h.spiscreen
+o.lcd:	h.SPIScreenHdr
+o.lcd:	C:Global.h.OSMem
+o.lcd:	C:DebugLib.h.DebugLib
+o.command:	c.command
+o.command:	C:h.kernel
+o.command:	C:h.swis
+o.command:	h.spiscreen
+o.command:	C:h.kernel
+o.command:	h.lcd
+o.command:	C:h.kernel
+o.command:	h.spiscreen
+o.command:	h.SPIScreenHdr
+o.spiasm: s.spiasm

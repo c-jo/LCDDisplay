@@ -1,15 +1,934 @@
-/* lcd.c - ILI9341 control: reset, init table, address window, and the
+	/* lcd.c - ILI9341 control: reset, init table, address window, and the
  * per-frame sprite -> DMA buffer -> SPI update. Ported from
  * PROClcdReset / PROClcdSetup / PROClcdSendInitData / PROCsetWindow /
  * PROClcdUpdate in source.txt.
  */
 
-#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+#include <stdbool.h>
+#include <stdint.h>
+
 #include "kernel.h"
+#include "swis.h"
 
 #include "spiscreen.h"
 #include "asm.h"
 #include "lcd.h"
+#include "SPIScreenHdr.h"
+
+#include "Global/OSMem.h"
+#include "DebugLib/DebugLib.h"
+
+#define SPI_CS_REG   0x00
+#define SPI_FIFO_REG 0x04
+#define SPI_DLEN_REG 0x0C
+#define SPI_DMA_REG  0x14
+
+#define SPI_CS_CLEAR_RX (1u << 5)
+#define SPI_CS_CLEAR_TX (1u << 4)
+#define SPI_CS_TA       (1u << 7)
+#define SPI_CS_DMAEN    (1u << 8)
+#define SPI_CS_DONE     (1u << 16)
+#define SPI_CS_RXD      (1u << 17)
+
+#define SPI_DMA_THRESHOLDS ((0x20 << 24) | (0x10 << 16) | (0x10 << 8) | 0x20)
+
+#define MADCTL_MY  0x80
+#define MADCTL_MV  0x20
+#define MADCTL_BGR 0x08
+
+#define DMA_CHANNEL_OFFSET 0x100
+#define DMA_REG_CS         0x00
+#define DMA_REG_CONBLK_AD  0x04
+#define DMA_REG_TXFR_LEN   0x14
+#define DMA_REG_DEBUG      0x20
+#define DMA_REG_ENABLE     0xFF0
+
+#define DMA_CS_ACTIVE                    (1u << 0)
+#define DMA_CS_END                       (1u << 1)
+#define DMA_CS_INT                       (1u << 2)
+#define DMA_CS_DREQ                      (1u << 3)
+#define DMA_CS_PAUSED                    (1u << 4)
+#define DMA_CS_ERROR                     (1u << 8)
+#define DMA_CS_WAIT_FOR_OUTSTANDING_WRITES (1u << 28)
+#define DMA_CS_ABORT                     (1u << 30)
+#define DMA_CS_RESET                     (1u << 31)
+
+#define DMA_TI_INTEN          (1u << 0)
+#define DMA_TI_TDMODE         (1u << 1)
+#define DMA_TI_WAIT_RESP      (1u << 3)
+#define DMA_TI_DEST_INC       (1u << 4)
+#define DMA_TI_DEST_WIDTH     (1u << 5)
+#define DMA_TI_DEST_DREQ      (1u << 6)
+#define DMA_TI_DEST_IGNORE    (1u << 7)
+#define DMA_TI_SRC_INC        (1u << 8)
+#define DMA_TI_SRC_WIDTH      (1u << 9)
+#define DMA_TI_SRC_DREQ       (1u << 10)
+#define DMA_TI_SRC_IGNORE     (1u << 11)
+#define DMA_TI_NO_WIDE_BURSTS (1u << 26)
+#define DMA_TI_PERMAP_SHIFT   16
+#define DMA_TI_WAITS_SHIFT    21
+#define DMA_DEBUG_CLEAR 0x7
+#define DMA_PRIORITY    (8u << 16)
+#define DMA_PANIC_PRIORITY (8u << 20)
+#define DMA_FRAME_SIZE_BYTES DMA_BUFFER_SIZE
+#define DMA_SPI_MAX_TRANSFER 65532u
+#define DMA_SPI_MAX_CHUNKS 8
+
+#define DMA_SPI_CHUNK_COUNT \
+    ((DMA_FRAME_SIZE_BYTES + DMA_SPI_MAX_TRANSFER - 1) / DMA_SPI_MAX_TRANSFER)
+
+#define DMA_SPI_TX_DREQ 6u
+#define DMA_SPI_RX_DREQ 7u
+
+typedef struct dma_control_block {
+    unsigned int transfer_info;
+    unsigned int source_ad;
+    unsigned int dest_ad;
+    unsigned int txfr_len;
+    unsigned int stride;
+    unsigned int nextconbk;
+    unsigned int reserved0;
+    unsigned int reserved1;
+} dma_control_block_t;
+
+typedef struct dma_region {
+    unsigned int address;
+    unsigned int length;
+} dma_region_t;
+
+typedef struct dma_input_context {
+  dma_region_t *regions;
+  int count;
+  int index;
+} dma_input_context_t;
+
+typedef struct dma_output_context {
+  dma_extent_t *extents;
+  int count;
+  int limit;
+} dma_output_context_t;
+
+static _kernel_oserror spiscreen_lcd_error;
+
+static int dma_output_failed;
+
+static _kernel_oserror *spiscreen_make_lcd_error(const char *text)
+{
+    spiscreen_lcd_error.errnum = 0x82ec01;
+    strncpy(spiscreen_lcd_error.errmess, text,
+            sizeof(spiscreen_lcd_error.errmess) - 1);
+    spiscreen_lcd_error.errmess[sizeof(spiscreen_lcd_error.errmess) - 1] = '\0';
+    return &spiscreen_lcd_error;
+}
+
+static volatile unsigned int *dma_channel_regs(spiscreen_ws *ws, unsigned int channel)
+{
+    return (volatile unsigned int *)
+        ((char *) ws->hw.dma_base + (channel * DMA_CHANNEL_OFFSET));
+}
+
+static unsigned int dma_control_block_phys(spiscreen_ws *ws, const void *ptr)
+{
+    int i;
+
+    for (i = 0; i < ws->dma_cb_extent_count; i++) {
+        const dma_extent_t *extent = &ws->dma_cb_extents[i];
+        unsigned int start = extent->logical;
+        unsigned int end = start + extent->length;
+        unsigned int address = (unsigned int) ptr;
+
+        if (address >= start && address < end)
+            return extent->physical + (address - start);
+    }
+
+    return 0;
+}
+
+static void dma_reset_channel(spiscreen_ws *ws, unsigned int channel)
+{
+    volatile unsigned int *regs = dma_channel_regs(ws, channel);
+
+    regs[DMA_REG_CS / 4] = DMA_CS_RESET;
+    regs[DMA_REG_DEBUG / 4] = DMA_DEBUG_CLEAR;
+    regs[DMA_REG_CS / 4] = DMA_CS_END | /*DMA_CS_INT |*/ DMA_CS_ERROR;
+    regs[DMA_REG_CONBLK_AD / 4] = 0;
+}
+
+static void dma_log_transfer_status(spiscreen_ws *ws,
+                                    volatile unsigned int *spi,
+                                    volatile unsigned int *tx_regs,
+                                    volatile unsigned int *rx_regs)
+{
+    volatile unsigned int *dma = (volatile unsigned int *) ws->hw.dma_base;
+
+    printf("SPI DMA status: ENABLE=%08x SPI CS=%08x; "
+           "TX CS=%08x CB=%08x LEN=%08x DEBUG=%08x; "
+           "RX CS=%08x CB=%08x LEN=%08x DEBUG=%08x\n",
+           dma[DMA_REG_ENABLE / 4],
+           spi[SPI_CS_REG / 4],
+           tx_regs[DMA_REG_CS / 4],
+           tx_regs[DMA_REG_CONBLK_AD / 4],
+           tx_regs[DMA_REG_TXFR_LEN / 4],
+           tx_regs[DMA_REG_DEBUG / 4],
+           rx_regs[DMA_REG_CS / 4],
+           rx_regs[DMA_REG_CONBLK_AD / 4],
+           rx_regs[DMA_REG_TXFR_LEN / 4],
+           rx_regs[DMA_REG_DEBUG / 4]);
+}
+
+_kernel_oserror *dma_input_function(_kernel_swi_regs *r, void *pw)
+{
+    dma_input_context_t *context = (dma_input_context_t*)r->r[9];
+
+    (void) pw;
+
+    r->r[1] = 0; // High word of address
+    r->r[2] = 0; // Flags
+
+    if (context->index >= context->count) {
+      r->r[0] = 0;
+      r->r[3] = 0;
+    }
+    else {
+      r->r[0] = (int) context->regions[context->index].address;
+      r->r[3] = (int) context->regions[context->index].length;
+      context->index++;
+    }
+
+    return NULL;
+}
+
+_kernel_oserror *dma_output_function(_kernel_swi_regs *r, void *pw)
+{
+    dma_output_context_t *context = (dma_output_context_t*)r->r[9];
+    dma_extent_t *extent;
+
+    void*    logical  = (void*)r->r[0];
+    uint64_t physical = (uint32_t) r->r[1] | ((uint64_t) r->r[2])<<32;
+    size_t   length   = r->r[4];
+    uint32_t flags    = r->r[3];
+
+    //printf("DMA output: log:%p phy:%llx len:%d flags:%x\n", logical, physical, length, flags);
+
+    (void) pw;
+
+    if (dma_output_failed)
+        return NULL;
+
+    if ((flags & 1u) != 0) {
+        dma_output_failed = 1;
+        return NULL;
+    }
+
+    if (context->count >= context->limit) {
+        dma_output_failed = 1;
+        return NULL;
+    }
+
+    extent = &context->extents[context->count++];
+    extent->logical  = (int)logical;
+    extent->physical = (int)physical;
+    extent->length   = length;
+    extent->flags    = flags;
+    return NULL;
+}
+
+static _kernel_oserror *dma_collect_extents(bool write,
+                                            dma_region_t *regions,
+                                            int region_count,
+                                            dma_extent_t *extents,
+                                            int *extent_count,
+                                            int extent_limit,
+                                            void *pw)
+{
+    _kernel_oserror *e;
+    _kernel_swi_regs r;
+
+    //printf("collect_extents: %p %d to %p (max %d)\n", (void*)regions, region_count, (void*)extents, extent_limit);
+    dma_input_context_t in_context = { regions, region_count, 0 };
+    dma_output_context_t out_context = { extents, 0, extent_limit };
+
+    dma_output_failed = 0;
+
+    r.r[0] = OSMemReason_DMAPrep | (write ? DMAPrep_Write : 0) | DMAPrep_Phys64;
+    r.r[1] = (int) pw;
+    r.r[2] = (int) &in_context;
+    r.r[3] = (int) dma_input_entry;
+    r.r[4] = (int) &out_context;
+    r.r[5] = (int) dma_output_entry;
+    e = _kernel_swi(OS_Memory, &r, &r);
+    if (e != NULL) {
+      printf("OS_Memory 19 failed %s\n", e->errmess);
+      return e;
+    }
+    if (dma_output_failed)
+        return spiscreen_make_lcd_error(
+            "OS_Memory 19 could not describe the DMA regions");
+
+    *extent_count = out_context.count;
+    return NULL;
+}
+
+static _kernel_oserror *dma_finish_regions(bool write,
+                                           dma_region_t *regions,
+                                           int region_count,
+                                           void *pw)
+{
+    _kernel_swi_regs r;
+
+    dma_input_context_t in_context = { regions, region_count, 0 };
+
+
+    r.r[0] = OSMemReason_DMAPrep | (write ? DMAPrep_Write : 0) | DMAPrep_Phys64 | DMAPrep_End;
+    r.r[1] = (int) pw;
+    r.r[2] = (int) &in_context;
+    r.r[3] = (int) dma_input_entry;
+    r.r[4] = 0;
+    r.r[5] = 0;
+    return _kernel_swi(OS_Memory, &r, &r);
+}
+
+static int dma_build_chain(spiscreen_ws *ws, dma_control_block_t *cb,
+                           dma_extent_t *extents, int extent_count,
+                           unsigned int offset, unsigned int length,
+                           unsigned int transfer_info,
+                           unsigned int fifo_address, int is_tx,
+                           int *control_block_count)
+{
+    int i;
+    int count = 0;
+    unsigned int remaining = length;
+
+    for (i = 0; i < extent_count; i++) {
+        unsigned int extent_offset;
+        unsigned int transfer_length;
+
+        if (offset >= extents[i].length) {
+            offset -= extents[i].length;
+            continue;
+        }
+
+        extent_offset = offset;
+        transfer_length = extents[i].length - extent_offset;
+        if (transfer_length > remaining)
+            transfer_length = remaining;
+
+        printf("dma_build_chain cb:%p count:%d\n", (void*)cb, count);
+        cb[count].transfer_info = transfer_info;
+        if (is_tx) {
+            cb[count].source_ad = 0xc0000000 + extents[i].physical + extent_offset;
+            cb[count].dest_ad   = fifo_address;
+        } else {
+            cb[count].source_ad = fifo_address;
+            cb[count].dest_ad   = 0xc0000000 + extents[i].physical + extent_offset;
+        }
+        cb[count].txfr_len = transfer_length;
+        cb[count].stride = 0;
+        cb[count].reserved0 = 0;
+        cb[count].reserved1 = 0;
+
+        printf("  %d bytes from %p to %p\n", cb[count].txfr_len, (void*)cb[count].source_ad, (void*)cb[count].dest_ad);
+
+        remaining -= transfer_length;
+        count++;
+        offset = 0;
+        if (remaining == 0)
+            break;
+    }
+
+    if (remaining != 0)
+        return 0;
+
+    for (i = 0; i < count; i++) {
+        if (i + 1 < count) {
+            cb[i].nextconbk = ws->cb_physical + DMA_CB_SIZE*(i+1);
+        } else {
+            cb[i].nextconbk = 0;
+        }
+    }
+
+    *control_block_count = count;
+    return 1;
+}
+
+static int dma_chain_is_mapped(spiscreen_ws *ws, dma_control_block_t *cb,
+                               int control_block_count)
+{
+    int i;
+
+    for (i = 0; i < control_block_count; i++) {
+        unsigned int next_phys = 0;
+
+        if (i + 1 < control_block_count) {
+            next_phys = dma_control_block_phys(ws, &cb[i + 1]);
+            if (next_phys == 0)
+                return 0;
+        }
+        if (cb[i].nextconbk != next_phys)
+            return 0;
+    }
+
+    return 1;
+}
+
+typedef struct dma_frame_transfer {
+    dma_region_t tx_regions[1];
+    dma_region_t rx_regions[1];
+    dma_region_t cb_regions[1];
+    dma_control_block_t *cb;
+    unsigned int tx_info;
+    unsigned int rx_info;
+    unsigned int transfer_lengths[DMA_SPI_CHUNK_COUNT];
+    int tx_cb_offsets[DMA_SPI_CHUNK_COUNT];
+    int rx_cb_offsets[DMA_SPI_CHUNK_COUNT];
+    int control_block_count;
+    struct {
+        unsigned transfer_length;
+        int      tx_cb_offset;
+        int      rx_cb_offset;
+    } chunk[DMA_SPI_MAX_CHUNKS];
+    int chunk_count;
+
+} dma_frame_transfer_t;
+
+static _kernel_oserror *dma_prepare_frame_buffers(spiscreen_ws *ws,
+                                                  dma_frame_transfer_t *transfer,
+                                                  void *pw)
+{
+    _kernel_oserror *e;
+
+    transfer->tx_regions[0].address = (unsigned int) ws->dmabuffer;
+    transfer->tx_regions[0].length = DMA_FRAME_SIZE_BYTES;
+    transfer->rx_regions[0].address = (unsigned int) ws->dma_rxbuffer;
+    transfer->rx_regions[0].length = DMA_FRAME_SIZE_BYTES;
+
+    e = dma_collect_extents(false, transfer->tx_regions, 1, ws->dma_tx_extents,
+                            &ws->dma_tx_extent_count, DMA_MAX_EXTENTS, pw);
+    if (e != NULL)
+        return e;
+
+    e = dma_collect_extents(true, transfer->rx_regions, 1, ws->dma_rx_extents,
+                            &ws->dma_rx_extent_count, DMA_MAX_EXTENTS, pw);
+    if (e != NULL) {
+        (void) dma_finish_regions(false, transfer->tx_regions, 1, pw);
+        return e;
+    }
+
+    ws->dma_tx_extents[0].logical  = (unsigned)ws->pci_logical;
+    ws->dma_tx_extents[0].physical = ws->pci_physical; // ws->pci_physical;
+    ws->dma_tx_extents[0].length   = 320*240*2;
+    ws->dma_tx_extents[0].flags    = 0;
+    ws->dma_tx_extent_count = 1;
+
+    //printf("DMA extents: TX:%d RX:%d\n",
+    //       ws->dma_tx_extent_count, ws->dma_rx_extent_count);
+    return NULL;
+}
+
+static _kernel_oserror *dma_finish_frame_buffers(dma_frame_transfer_t *transfer,
+                                                 void *pw)
+{
+    _kernel_oserror *e;
+
+    e = dma_finish_regions(true, transfer->rx_regions, 1, pw);
+    if (e != NULL)
+        printf("Error on DMA finish for TX region: %s\n", e->errmess);
+
+    e = dma_finish_regions(false, transfer->tx_regions, 1, pw);
+    if (e != NULL)
+        printf("Error on DMA finish for RX region: %s\n", e->errmess);
+
+    return NULL;
+}
+
+/* This initial call provides the physical addresses needed for nextconbk.
+ * The completed chains are always ended and prepared again before DMA runs. */
+static _kernel_oserror *dma_map_control_blocks(spiscreen_ws *ws,
+                                                dma_frame_transfer_t *transfer,
+                                                void *pw)
+{
+    transfer->cb = (dma_control_block_t *) ws->cb_logical;
+    transfer->cb_regions[0].address = (unsigned int) transfer->cb;
+    transfer->cb_regions[0].length = DMA_MAX_CONTROL_BLOCKS * DMA_CB_SIZE;
+
+    return dma_collect_extents(false, transfer->cb_regions, 1,
+                               ws->dma_cb_extents, &ws->dma_cb_extent_count,
+                               DMA_MAX_EXTENTS, pw);
+}
+
+static _kernel_oserror *dma_prepare_control_blocks(spiscreen_ws *ws,
+                                                    dma_frame_transfer_t *transfer,
+                                                    void *pw)
+{
+    return dma_collect_extents(false, transfer->cb_regions, 1,
+                               ws->dma_cb_extents, &ws->dma_cb_extent_count,
+                               DMA_MAX_EXTENTS, pw);
+}
+
+static _kernel_oserror *dma_finish_control_blocks(dma_frame_transfer_t *transfer, void *pw)
+{
+    return  dma_finish_regions(false, transfer->cb_regions, 1, pw);
+}
+
+static _kernel_oserror *dma_build_frame_control_blocks(
+    spiscreen_ws *ws, dma_frame_transfer_t *transfer)
+{
+    unsigned int transfer_offset;
+
+    transfer->tx_info = DMA_TI_NO_WIDE_BURSTS | DMA_TI_WAIT_RESP
+                      | DMA_TI_SRC_INC | DMA_TI_DEST_DREQ
+                      | (DMA_SPI_TX_DREQ << DMA_TI_PERMAP_SHIFT);
+                      //| (16 << DMA_TI_WAITS_SHIFT);
+    transfer->rx_info = DMA_TI_NO_WIDE_BURSTS | DMA_TI_WAIT_RESP
+                      | DMA_TI_DEST_INC | DMA_TI_SRC_DREQ
+                      | (DMA_SPI_RX_DREQ << DMA_TI_PERMAP_SHIFT);
+                      //| (16 << DMA_TI_WAITS_SHIFT);
+
+    for (transfer_offset = 0; transfer_offset < DMA_FRAME_SIZE_BYTES;
+         transfer->chunk_count++) {
+        unsigned int transfer_length = DMA_FRAME_SIZE_BYTES - transfer_offset;
+
+        int tx_cb_count;
+        int rx_cb_count;
+        if (transfer_length > DMA_SPI_MAX_TRANSFER)
+            transfer_length = DMA_SPI_MAX_TRANSFER;
+        if (transfer->chunk_count >= DMA_SPI_CHUNK_COUNT)
+            return spiscreen_make_lcd_error("Too many SPI DMA chunks");
+
+        printf("transfer %d bytes from offset %d\n", transfer_length, transfer_offset);
+
+        transfer->tx_cb_offsets[transfer->chunk_count] =
+            transfer->control_block_count;
+
+        if (!dma_build_chain(ws,
+                             transfer->cb + transfer->control_block_count,
+                             ws->dma_tx_extents, ws->dma_tx_extent_count,
+                             transfer_offset, transfer_length, transfer->tx_info,
+                             SPI_BUS_BASE + SPI_FIFO_REG, 1, &tx_cb_count)
+            || !dma_build_chain(ws,
+                                transfer->cb + transfer->control_block_count
+                                             + tx_cb_count,
+                                ws->dma_rx_extents, ws->dma_rx_extent_count,
+                                transfer_offset, transfer_length, transfer->rx_info,
+                                SPI_BUS_BASE + SPI_FIFO_REG, 0, &rx_cb_count))
+            return spiscreen_make_lcd_error(
+                "DMA control-block address translation failed");
+
+        printf("Chains built (%d tx / %d rx contol blocks)\n",
+                tx_cb_count, rx_cb_count);
+
+        transfer->rx_cb_offsets[transfer->chunk_count] =
+            transfer->control_block_count + tx_cb_count;
+        transfer->transfer_lengths[transfer->chunk_count] = transfer_length;
+        transfer->control_block_count += tx_cb_count + rx_cb_count;
+        if (transfer->control_block_count > DMA_MAX_CONTROL_BLOCKS)
+            return spiscreen_make_lcd_error("Too many DMA control blocks");
+
+        transfer_offset += transfer_length;
+    }
+
+    return NULL;
+}
+
+static _kernel_oserror *dma_run_chunk(spiscreen_ws *ws,
+                                      const dma_frame_transfer_t *transfer,
+                                      int chunk_index)
+{
+    // printf("dma_run_chunk %d\n", chunk_index);
+    volatile unsigned int *spi = (volatile unsigned int *) ws->hw.spi_base;
+    volatile unsigned int *tx_regs = dma_channel_regs(ws, DMA_TX_CHANNEL);
+    volatile unsigned int *rx_regs = dma_channel_regs(ws, DMA_RX_CHANNEL);
+    int tx_cb_count;
+    int rx_cb_count;
+    unsigned int first_tx_cb_phys;
+    unsigned int first_rx_cb_phys;
+    unsigned int spi_cs;
+    int timed_out = 0;
+    int timeout;
+
+    tx_cb_count = transfer->rx_cb_offsets[chunk_index]
+                - transfer->tx_cb_offsets[chunk_index];
+    rx_cb_count = (chunk_index + 1 < transfer->chunk_count)
+                ? transfer->tx_cb_offsets[chunk_index + 1]
+                - transfer->rx_cb_offsets[chunk_index]
+                : transfer->control_block_count - transfer->rx_cb_offsets[chunk_index];
+    first_tx_cb_phys = dma_control_block_phys(
+        ws, transfer->cb + transfer->tx_cb_offsets[chunk_index]);
+    first_rx_cb_phys = dma_control_block_phys(
+        ws, transfer->cb + transfer->rx_cb_offsets[chunk_index]);
+    if (first_tx_cb_phys == 0 || first_rx_cb_phys == 0)
+        return spiscreen_make_lcd_error("DMA control blocks are not addressable");
+    if (!dma_chain_is_mapped(ws, transfer->cb + transfer->tx_cb_offsets[chunk_index],
+                             tx_cb_count)
+        || !dma_chain_is_mapped(ws,
+                                transfer->cb + transfer->rx_cb_offsets[chunk_index],
+                                rx_cb_count))
+        return spiscreen_make_lcd_error(
+            "DMA control blocks moved during preparation");
+
+
+    spi[SPI_CS_REG / 4] &= ~SPI_CS_TA;
+    spi[SPI_CS_REG / 4] |= SPI_CS_CLEAR_TX | SPI_CS_CLEAR_RX | SPI_CS_DMAEN;
+    spi[SPI_DMA_REG / 4] = SPI_DMA_THRESHOLDS;
+    spi[SPI_DLEN_REG / 4] = transfer->transfer_lengths[chunk_index];
+ //   spi[SPI_CS_REG / 4] |= SPI_CS_TA;
+//    spi_cs = spi[SPI_CS_REG / 4] & 0x0cu;
+
+    dma_reset_channel(ws, DMA_TX_CHANNEL);
+    dma_reset_channel(ws, DMA_RX_CHANNEL);
+
+    tx_regs[DMA_REG_CONBLK_AD / 4] = first_tx_cb_phys;
+    rx_regs[DMA_REG_CONBLK_AD / 4] = first_rx_cb_phys;
+
+    tx_regs[DMA_REG_DEBUG / 4] = DMA_DEBUG_CLEAR;
+    tx_regs[DMA_REG_CS / 4]   |= DMA_CS_END | /*DMA_CS_INT |*/ DMA_CS_ERROR;
+    tx_regs[DMA_REG_CS / 4]   |= DMA_PRIORITY | DMA_PANIC_PRIORITY |
+                                 DMA_CS_WAIT_FOR_OUTSTANDING_WRITES;
+
+    rx_regs[DMA_REG_DEBUG / 4] = DMA_DEBUG_CLEAR;
+    rx_regs[DMA_REG_CS / 4]   |= DMA_CS_END | /*DMA_CS_INT |*/ DMA_CS_ERROR;
+    rx_regs[DMA_REG_CS / 4]   |= DMA_PRIORITY | DMA_PANIC_PRIORITY |
+                                 DMA_CS_WAIT_FOR_OUTSTANDING_WRITES;
+
+    dma_log_transfer_status(ws, spi, tx_regs, rx_regs);
+
+//    int irqs_disabled = _kernel_irqs_disabled();
+//    if (!irqs_disabled) _kernel_irqs_off();
+
+//    spi[SPI_CS_REG / 4] |= SPI_CS_TA;
+    spi[SPI_CS_REG / 4] |= SPI_CS_TA;
+
+    //dma_log_transfer_status(ws, spi, tx_regs, rx_regs);
+
+    tx_regs[DMA_REG_CS / 4] |= DMA_CS_ACTIVE;
+    rx_regs[DMA_REG_CS / 4] |= DMA_CS_ACTIVE;
+
+    timeout = _swi(OS_ReadMonotonicTime, _RETURN(0)) + 25;
+
+    while ((tx_regs[DMA_REG_CS / 4] & DMA_CS_END) == 0
+           || (rx_regs[DMA_REG_CS / 4] & DMA_CS_END) == 0
+           || (spi[SPI_CS_REG / 4] & SPI_CS_DONE) == 0) {
+        if (_swi(OS_ReadMonotonicTime, _RETURN(0)) >= timeout) {
+            timed_out = 1;
+            break;
+        }
+    }
+
+    spi[SPI_CS_REG / 4] &= ~SPI_CS_TA;
+    spi[SPI_CS_REG / 4] |=  SPI_CS_DONE;
+    spi[SPI_CS_REG / 4] |=  SPI_CS_CLEAR_TX | SPI_CS_CLEAR_RX;
+
+//    if (!irqs_disabled) _kernel_irqs_on();
+
+    printf("SPI DMA chunk %d %s (%u bytes)\n", chunk_index,
+           (timed_out ? "TIMEOUT" : "completed"),
+           transfer->transfer_lengths[chunk_index]);
+    dma_log_transfer_status(ws, spi, tx_regs, rx_regs);
+
+    if (timed_out)
+        return spiscreen_make_lcd_error("SPI DMA transfer timed out");
+    if ((tx_regs[DMA_REG_CS / 4] & DMA_CS_ERROR) != 0
+        || (rx_regs[DMA_REG_CS / 4] & DMA_CS_ERROR) != 0)
+        return spiscreen_make_lcd_error("SPI DMA transfer failed");
+    return NULL;
+}
+
+#if 0
+/* Replaced by the phased implementation below. */
+static _kernel_oserror *dma_run_frame_transfer_legacy(spiscreen_ws *ws,
+                                                       void *pw)
+{
+    _kernel_oserror *e;
+    volatile unsigned int *spi = (volatile unsigned int *) ws->hw.spi_base;
+    volatile unsigned int *tx_regs;
+    volatile unsigned int *rx_regs;
+    dma_control_block_t *cb = (dma_control_block_t *) ws->dma_cb;
+    dma_region_t tx_regions[1];
+    dma_region_t rx_regions[1];
+    dma_region_t cb_regions[1];
+    unsigned int tx_info;
+    unsigned int rx_info;
+    unsigned int spi_cs;
+    unsigned int first_tx_cb_phys;
+    unsigned int first_rx_cb_phys;
+    int tx_cb_count;
+    int rx_cb_count;
+    int timed_out = 0;
+    unsigned int transfer_offset;
+    unsigned int transfer_lengths[DMA_SPI_CHUNK_COUNT];
+    int tx_cb_offsets[DMA_SPI_CHUNK_COUNT];
+    int rx_cb_offsets[DMA_SPI_CHUNK_COUNT];
+    int chunk_count = 0;
+    int chunk_index;
+    int control_block_count = 0;
+
+    tx_regions[0].address = (unsigned int) ws->dmabuffer;
+    tx_regions[0].length  = DMA_FRAME_SIZE_BYTES;
+    rx_regions[0].address = (unsigned int) ws->dma_rxbuffer;
+    rx_regions[0].length  = DMA_FRAME_SIZE_BYTES;
+
+    e = dma_collect_extents(false, tx_regions, 1, ws->dma_tx_extents,
+                            &ws->dma_tx_extent_count, DMA_MAX_EXTENTS, pw);
+    if (e != NULL)
+        return e;
+
+    e = dma_collect_extents(true, rx_regions, 1, ws->dma_rx_extents,
+                            &ws->dma_rx_extent_count, DMA_MAX_EXTENTS, pw);
+    if (e != NULL) {
+        (void) dma_finish_regions(0, tx_regions, 1, pw);
+        return e;
+    }
+
+    printf("DMA extents: TX:%d RX:%d\n",
+           ws->dma_tx_extent_count, ws->dma_rx_extent_count);
+
+    cb_regions[0].address = (unsigned int) ws->dma_cb;
+    cb_regions[0].length = DMA_MAX_CONTROL_BLOCKS * DMA_CB_SIZE;
+
+    e = dma_collect_extents(0, cb_regions, 1, ws->dma_cb_extents,
+                            &ws->dma_cb_extent_count, DMA_MAX_EXTENTS, pw);
+    if (e != NULL) {
+        (void) dma_finish_regions(true,  rx_regions, 1, pw);
+        (void) dma_finish_regions(false, tx_regions, 1, pw);
+        return e;
+    }
+
+    tx_info = DMA_TI_NO_WIDE_BURSTS | DMA_TI_WAIT_RESP | DMA_TI_SRC_INC
+            | DMA_TI_DEST_DREQ | (DMA_SPI_TX_DREQ << DMA_TI_PERMAP_SHIFT);
+    rx_info = DMA_TI_NO_WIDE_BURSTS | DMA_TI_WAIT_RESP | DMA_TI_DEST_INC
+            | DMA_TI_SRC_DREQ | (DMA_SPI_RX_DREQ << DMA_TI_PERMAP_SHIFT);
+
+    tx_regs = dma_channel_regs(ws, DMA_TX_CHANNEL);
+    rx_regs = dma_channel_regs(ws, DMA_RX_CHANNEL);
+
+    e = NULL;
+    for (transfer_offset = 0; transfer_offset < DMA_FRAME_SIZE_BYTES;
+         chunk_count++) {
+         unsigned int transfer_length = DMA_FRAME_SIZE_BYTES - transfer_offset;
+         printf("chunk %d: from %d (%d bytes)\n", chunk_count, transfer_offset, transfer_length);
+
+        if (transfer_length > DMA_SPI_MAX_TRANSFER)
+            transfer_length = DMA_SPI_MAX_TRANSFER;
+        if (chunk_count >= DMA_SPI_CHUNK_COUNT) {
+            e = spiscreen_make_lcd_error("Too many SPI DMA chunks");
+            break;
+        }
+
+        tx_cb_offsets[chunk_count] = control_block_count;
+        if (!dma_build_chain(ws, cb + control_block_count, ws->dma_tx_extents,
+                             ws->dma_tx_extent_count, transfer_offset,
+                             transfer_length, tx_info,
+                             SPI_BUS_BASE + SPI_FIFO_REG, 1, &tx_cb_count)
+            || !dma_build_chain(ws, cb + control_block_count + tx_cb_count,
+                                ws->dma_rx_extents,
+                                ws->dma_rx_extent_count, transfer_offset,
+                                transfer_length, rx_info,
+                                SPI_BUS_BASE + SPI_FIFO_REG, 0, &rx_cb_count)) {
+            e = spiscreen_make_lcd_error(
+                "DMA control-block address translation failed");
+            break;
+        }
+
+        printf("tx_cb_count: %d, rx_cb_count: %d\n", tx_cb_count, rx_cb_count);
+        rx_cb_offsets[chunk_count] = control_block_count + tx_cb_count;
+        transfer_lengths[chunk_count] = transfer_length;
+        control_block_count += tx_cb_count + rx_cb_count;
+        if (control_block_count > DMA_MAX_CONTROL_BLOCKS) {
+            e = spiscreen_make_lcd_error("Too many DMA control blocks");
+            break;
+        }
+        transfer_offset += transfer_length;
+    }
+
+    if (e == NULL) {
+        (void) dma_finish_regions(0, cb_regions, 1, pw);
+        e = dma_collect_extents(0, cb_regions, 1, ws->dma_cb_extents,
+                                &ws->dma_cb_extent_count, DMA_MAX_EXTENTS, pw);
+    }
+
+    for (chunk_index = 0; e == NULL && chunk_index < chunk_count;
+         chunk_index++) {
+        int timeout;
+
+        tx_cb_count = rx_cb_offsets[chunk_index] - tx_cb_offsets[chunk_index];
+        rx_cb_count = (chunk_index + 1 < chunk_count)
+                    ? tx_cb_offsets[chunk_index + 1] - rx_cb_offsets[chunk_index]
+                    : control_block_count - rx_cb_offsets[chunk_index];
+        first_tx_cb_phys = dma_control_block_phys(
+            ws, cb + tx_cb_offsets[chunk_index]);
+        first_rx_cb_phys = dma_control_block_phys(
+            ws, cb + rx_cb_offsets[chunk_index]);
+        if (first_tx_cb_phys == 0 || first_rx_cb_phys == 0) {
+            e = spiscreen_make_lcd_error(
+                "DMA control blocks are not addressable");
+            break;
+        }
+        if (!dma_chain_is_mapped(ws, cb + tx_cb_offsets[chunk_index],
+                                 tx_cb_count)
+            || !dma_chain_is_mapped(ws, cb + rx_cb_offsets[chunk_index],
+                                    rx_cb_count)) {
+            e = spiscreen_make_lcd_error(
+                "DMA control blocks moved during preparation");
+            break;
+        }
+        dma_reset_channel(ws, DMA_TX_CHANNEL);
+        dma_reset_channel(ws, DMA_RX_CHANNEL);
+
+        spi[SPI_DLEN_REG / 4] = transfer_lengths[chunk_index];
+        spi[SPI_DMA_REG / 4] = SPI_DMA_THRESHOLDS;
+        spi_cs = spi[SPI_CS_REG / 4];
+        spi_cs &= 0x0cu;
+        spi_cs |= SPI_CS_CLEAR_TX | SPI_CS_CLEAR_RX | SPI_CS_TA | SPI_CS_DMAEN;
+        spi[SPI_CS_REG / 4] = spi_cs;
+
+        rx_regs[DMA_REG_CONBLK_AD / 4] = first_rx_cb_phys;
+        rx_regs[DMA_REG_DEBUG / 4] = DMA_DEBUG_CLEAR;
+        rx_regs[DMA_REG_CS / 4] = DMA_CS_END | /*DMA_CS_INT |*/ DMA_CS_ERROR;
+        rx_regs[DMA_REG_CS / 4] = DMA_PRIORITY | DMA_PANIC_PRIORITY
+                                | DMA_CS_WAIT_FOR_OUTSTANDING_WRITES
+                                | DMA_CS_ACTIVE;
+
+        tx_regs[DMA_REG_CONBLK_AD / 4] = first_tx_cb_phys;
+        tx_regs[DMA_REG_DEBUG / 4] = DMA_DEBUG_CLEAR;
+        tx_regs[DMA_REG_CS / 4] = DMA_CS_END | /*DMA_CS_INT*/ | DMA_CS_ERROR;
+        tx_regs[DMA_REG_CS / 4] = DMA_PRIORITY | DMA_PANIC_PRIORITY
+                                | DMA_CS_WAIT_FOR_OUTSTANDING_WRITES
+                                | DMA_CS_ACTIVE;
+
+        timeout = _swi(OS_ReadMonotonicTime, _RETURN(0)) + 250;
+        while ((tx_regs[DMA_REG_CS / 4] & DMA_CS_END) == 0
+               || (rx_regs[DMA_REG_CS / 4] & DMA_CS_END) == 0
+               || (spi[SPI_CS_REG / 4] & SPI_CS_DONE) == 0) {
+            if (_swi(OS_ReadMonotonicTime, _RETURN(0)) >= timeout) {
+                printf("Timeout (1) at %u/%u\n",
+                       chunk_index * DMA_SPI_MAX_TRANSFER,
+                       DMA_FRAME_SIZE_BYTES);
+                dma_log_transfer_status(ws, spi, tx_regs, rx_regs);
+                timed_out = 1;
+                break;
+            }
+        }
+
+        spi_cs = spi[SPI_CS_REG / 4];
+        timeout = _swi(OS_ReadMonotonicTime, _RETURN(0)) + 250;
+        while ((spi_cs & SPI_CS_RXD) != 0) {
+            (void) spi[SPI_FIFO_REG / 4];
+            spi_cs = spi[SPI_CS_REG / 4];
+            if (_swi(OS_ReadMonotonicTime, _RETURN(0)) >= timeout) {
+                printf("Timeout (2) at %u/%u\n",
+                       chunk_index * DMA_SPI_MAX_TRANSFER,
+                       DMA_FRAME_SIZE_BYTES);
+                dma_log_transfer_status(ws, spi, tx_regs, rx_regs);
+                timed_out = 1;
+                break;
+            }
+        }
+        spi_cs |= SPI_CS_CLEAR_TX | SPI_CS_CLEAR_RX;
+        spi_cs &= ~SPI_CS_TA;
+        spi[SPI_CS_REG / 4] = spi_cs;
+
+        printf("SPI DMA chunk %d complete (%u bytes)\n",
+               chunk_index, transfer_lengths[chunk_index]);
+        dma_log_transfer_status(ws, spi, tx_regs, rx_regs);
+
+        if (timed_out) {
+            e = spiscreen_make_lcd_error("SPI DMA transfer timed out");
+            break;
+        }
+
+        if ((tx_regs[DMA_REG_CS / 4] & DMA_CS_ERROR) != 0
+            || (rx_regs[DMA_REG_CS / 4] & DMA_CS_ERROR) != 0) {
+            dma_log_transfer_status(ws, spi, tx_regs, rx_regs);
+            e = spiscreen_make_lcd_error("SPI DMA transfer failed");
+            break;
+        }
+
+    }
+
+    spi[SPI_DLEN_REG / 4] = 0;
+    dma_reset_channel(ws, DMA_TX_CHANNEL);
+    dma_reset_channel(ws, DMA_RX_CHANNEL);
+
+    if (dma_finish_regions(false, cb_regions, 1, pw) == NULL) {
+        if (dma_finish_regions(true, rx_regions, 1, pw) == NULL) {
+            if (dma_finish_regions(0, tx_regions, 1, pw) != NULL && e == NULL)
+                e = spiscreen_make_lcd_error("OS_Memory 19 end for TX failed");
+        } else if (e == NULL) {
+            e = spiscreen_make_lcd_error("OS_Memory 19 end for RX failed");
+        }
+    } else if (e == NULL) {
+        e = spiscreen_make_lcd_error("OS_Memory 19 end for control blocks failed");
+    }
+
+    return e;
+}
+#endif
+
+static _kernel_oserror *dma_run_frame_transfer(spiscreen_ws *ws, void *pw)
+{
+    dma_frame_transfer_t transfer;
+    volatile unsigned int *spi = (volatile unsigned int *) ws->hw.spi_base;
+    volatile unsigned int *dma = (volatile unsigned int *) ws->hw.dma_base;
+    _kernel_oserror *e;
+    int chunk_index;
+
+    memset(&transfer, 0, sizeof(transfer));
+    transfer.cb = (dma_control_block_t *) ws->cb_logical;
+
+    printf("Preparing frame buffers\n");
+    e = dma_prepare_frame_buffers(ws, &transfer, pw);
+    if (e != NULL)
+        return e;
+
+    printf("Building frame control blocks\n");
+    e = dma_build_frame_control_blocks(ws, &transfer);
+    if (e != NULL)
+        return e;
+    /* Mapping is required to encode physical nextconbk addresses. */
+    //printf("Mapping control blocks...\n");
+
+    printf("Mapping frame control blocks\n");
+    e = dma_map_control_blocks(ws, &transfer, pw);
+    if (e != NULL)
+        return e;
+
+    printf("Preparing control blocks\n");
+    e = dma_prepare_control_blocks(ws, &transfer, pw);
+    if (e != NULL)
+        return e;
+
+    for (chunk_index = 0; e == NULL && chunk_index < transfer.chunk_count;
+         chunk_index++) {
+        printf("Chunk %d of %d\n", chunk_index+1, transfer.chunk_count);
+        e = dma_run_chunk(ws, &transfer, chunk_index);
+    }
+    spi[SPI_DLEN_REG / 4] = 0;
+    dma_reset_channel(ws, DMA_TX_CHANNEL);
+    dma_reset_channel(ws, DMA_RX_CHANNEL);
+
+    e = dma_finish_control_blocks(&transfer, pw);
+    if (e != NULL)
+      return e;
+
+    e = dma_finish_frame_buffers(&transfer, pw);
+    if (e != NULL)
+      return e;
+
+    return e;
+}
+
+_kernel_oserror *spiscreen_dma_prepare(spiscreen_ws *ws)
+{
+    memset(ws->dmabuffer, 0x00, DMA_BUFFER_SIZE);
+    //memset(ws->dma_rxbuffer, 0x00, DMA_BUFFER_SIZE);
+    memset(ws->cb_logical, 0x00, DMA_MAX_CONTROL_BLOCKS * DMA_CB_SIZE);
+
+    dma_reset_channel(ws, DMA_TX_CHANNEL);
+    dma_reset_channel(ws, DMA_RX_CHANNEL);
+    return NULL;
+}
 
 /* ILI9341 initialisation table. Each entry is a command byte followed by
  * its parameter bytes (stored one-per-word, since spi_send reads whole
@@ -26,7 +945,7 @@ typedef struct {
 } lcd_init_cmd_t;
 
 static const lcd_init_cmd_t lcd_init_table[] = {
-    { 0x36, 1,  { 0x00 } },
+    { 0x36, 1,  { MADCTL_MY | MADCTL_MV | MADCTL_BGR } },
     { 0x3A, 1,  { 0x05 } },
     { 0x31, 0,  { 0 } },
     { 0x2A, 4,  { 0x00, 0x00, 0x01, 0x3F } },
@@ -93,37 +1012,46 @@ _kernel_oserror *lcd_set_backlight(spiscreen_ws *ws, int enabled)
 
 _kernel_oserror *lcd_set_window(spiscreen_ws *ws, int x0, int y0, int x1, int y1)
 {
-    int *scratch = (int *) ws->scratch;
+  int *scratch = (int *) ws->scratch;
 
-    /* NOTE: command bytes 0x2B/0x2C below are an unmodified port of the
-     * original PROCsetWindow (source.txt lines 487-499). */
+    /* ILI9341 column and page address set commands. */
     scratch[0] = (x0 >> 8) & 0xFF;
     scratch[1] = x0 & 0xFF;
     scratch[2] = (x1 >> 8) & 0xFF;
     scratch[3] = x1 & 0xFF;
-    spiscreen_spi(ws, 0x2B, scratch, scratch + 4);
+    spiscreen_spi(ws, 0x2A, scratch, scratch + 4);
 
     scratch[0] = (y0 >> 8) & 0xFF;
     scratch[1] = y0 & 0xFF;
     scratch[2] = (y1 >> 8) & 0xFF;
     scratch[3] = y1 & 0xFF;
-    spiscreen_spi(ws, 0x2C, scratch, scratch + 4);
+    spiscreen_spi(ws, 0x2B, scratch, scratch + 4);
 
     return NULL;
 }
 
-void lcd_update(spiscreen_ws *ws)
+_kernel_oserror *lcd_build(spiscreen_ws *ws, void *pw)
 {
-    const unsigned char *src = (const unsigned char *) ws->spriteptr + 44;
-    unsigned char *dma = (unsigned char *) ws->dmabuffer;
-    int y;
+    const unsigned char *src =
+        (const unsigned char *) ws->spriteptr + 44;
+    unsigned char *dma = (unsigned char *) ws->pci_logical; // ws->dmabuffer;
+    printf("lcd_build dest:%p\n", dma);
 
-    for (y = 0; y <= 0x778; y += 8) {
-        void *dst_start = dma + y + 0x95880;
-        const void *dst_threshold = dma + y;
+    uint16_t *t = (uint16_t*)dma;
+    uint16_t *s = (uint16_t*)src;
+    int i;
 
-        src = (const unsigned char *) lcd_lineblt(src, dst_start, dst_threshold);
+    for (i = 0; i < DMA_BUFFER_SIZE / 2; ++i) {
+      t[i] = (s[i] & 0x00ff) << 8 | (s[i] & 0xff00) >> 8;
     }
 
-    spiscreen_spi(ws, 0x2c, dma, dma + DMA_BUFFER_SIZE);
+    printf("Done\n");
+
+    return 0;
+}
+
+_kernel_oserror *lcd_update(spiscreen_ws *ws, void *pw)
+{
+    spiscreen_spi(ws, 0x2c, ws->scratch, ws->scratch);
+    return dma_run_frame_transfer(ws, pw);
 }

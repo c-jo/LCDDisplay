@@ -9,6 +9,11 @@
 initialisation-code: module_init
 finalisation-code: module_final
 
+; OS_Memory reason 19 calls these while the module's C environment must
+; be established by a CMHG veneer.
+generic-veneers: dma_input_entry/dma_input_function,
+                 dma_output_entry/dma_output_function
+
 title-string: SPIScreen
 help-string: SPIScreen Module_FullVersion_CMHG
 

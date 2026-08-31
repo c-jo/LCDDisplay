@@ -7,6 +7,8 @@
  */
 
 #include <string.h>
+#include <stdio.h>
+
 #include "kernel.h"
 #include "swis.h"
 
@@ -31,11 +33,16 @@ static _kernel_oserror *spiscreen_make_error(const char *text)
     return &spiscreen_error;
 }
 
-static _kernel_oserror *spiscreen_load(const char *arg_string, int argc, spiscreen_ws *ws)
+static _kernel_oserror *spiscreen_load(const char *arg_string, int argc, spiscreen_ws *ws, void *pw)
 {
     _kernel_oserror *e;
     _kernel_swi_regs r;
     int width, height, mode;
+
+    if (arg_string[0] == '@') {
+      printf("Using exisitng image.\n");
+      return lcd_update(ws, pw);
+    }
 
     if (argc < 1 || arg_string == NULL || arg_string[0] == '\0')
         return spiscreen_make_error("Syntax: *SPIScreenLoad <sprite file>");
@@ -77,14 +84,20 @@ static _kernel_oserror *spiscreen_load(const char *arg_string, int argc, spiscre
         /*|| mode != REQUIRED_SPRITE_MODE*/) {
         spiscreen_reset_spritearea(ws);
         return spiscreen_make_error(
-            "Sprite must be 320x240 pixels in the panel's 16bpp mode");
+            "Sprite must be 320x240 pixels, 16bpp");
     }
 
     /* offset to first sprite is area word 2 (see spiscreen_reset_spritearea) */
     ws->spriteptr = (char *) ws->spritearea + ((int *) ws->spritearea)[2];
     ws->image_loaded = 1;
 
-    lcd_update(ws);
+    e = lcd_build(ws, pw);
+    if (e != NULL)
+      return e;
+
+    e = lcd_update(ws, pw);
+    if (e != NULL)
+        return e;
 
     return NULL;
 }
@@ -100,15 +113,12 @@ _kernel_oserror *spiscreen_command(const char *arg_string, int argc, int cmd_no,
 
     switch (cmd_no) {
     case CMD_SPIScreenLoad:
-        return spiscreen_load(arg_string, argc, ws);
+        return spiscreen_load(arg_string, argc, ws, pw);
 
     case CMD_SPIScreenOff:
         return lcd_set_backlight(ws, 0);
 
     case CMD_SPIScreenOn:
-        if (!ws->image_loaded)
-            return spiscreen_make_error(
-                "No image has been loaded - use *SPIScreenLoad first");
         return lcd_set_backlight(ws, 1);
 
     default:

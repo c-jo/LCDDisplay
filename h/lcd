@@ -12,6 +12,10 @@
  * words in [start,end). Thin wrapper around spi_send binding in ws->hw. */
 void spiscreen_spi(spiscreen_ws *ws, int cmd, const void *start, const void *end);
 
+/* Prepare the DMA-visible address information for the module's permanent
+ * TX/RX/control-block buffers. */
+_kernel_oserror *spiscreen_dma_prepare(spiscreen_ws *ws);
+
 /* Panel reset sequence (GPIO pulses + delays) - port of PROClcdReset. */
 void lcd_reset(spiscreen_ws *ws);
 
@@ -25,8 +29,10 @@ _kernel_oserror *lcd_set_backlight(spiscreen_ws *ws, int enabled);
 /* Set the ILI9341 column/row address window - port of PROCsetWindow. */
 _kernel_oserror *lcd_set_window(spiscreen_ws *ws, int x0, int y0, int x1, int y1);
 
-/* Convert the current sprite (ws->spriteptr) into the DMA buffer and
- * stream it to the panel - port of PROClcdUpdate. */
-void lcd_update(spiscreen_ws *ws);
+/* Convert the current sprite (ws->spriteptr) into the DMA buffer. */
+_kernel_oserror *lcd_build(spiscreen_ws *ws, void *pw);
+
+/* Stream the current DBA buffer to the panel - port of PROClcdUpdate. */
+_kernel_oserror *lcd_update(spiscreen_ws *ws, void *pw);
 
 #endif /* SPISCREEN_LCD_H */

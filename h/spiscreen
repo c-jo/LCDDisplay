@@ -8,11 +8,15 @@
 #define SPISCREEN_H
 
 #include "kernel.h"
+#include <stdint.h>
 
 /* Physical register bases, mapped once at Init via OS_Memory reason 13 */
 #define GPIO_PHYS_BASE   0xFE200000u
 #define SPI_PHYS_BASE    0xFE204000u
+#define SPI_BUS_BASE     0x7E204000u
+#define DMA_PHYS_BASE    0xFE007000u
 #define GPIO_SPI_MAP_SIZE 0x100
+#define DMA_MAP_SIZE      0x1000
 
 /* GPIO pin assignments (BCM numbering) - board specific, see instructions */
 #define PIN_CS   8
@@ -21,11 +25,12 @@
 #define PIN_RST  27
 
 /* SPI0 clock divider */
-#define SPI_CLOCK_DIV 4
+// #define SPI_CLOCK_DIV 4
 
-/* Panel geometry - the module only supports this exact configuration */
+/* Panel geometry */
 #define SCREEN_WIDTH  320
 #define SCREEN_HEIGHT 240
+#define SCREEN_DEPTH  2
 
 /* Sprite mode word required for a directly-displayable sprite: 16bpp,
  * new-style mode word, as produced by the original DIM'd sprite
@@ -37,8 +42,33 @@
  * = 153660, round up  */
 #define SPRITE_AREA_SIZE 163840
 
-/* 320 * 240 * 16bpp expanded to 32-bit words for the SPI DMA staging buffer */
-#define DMA_BUFFER_SIZE 614400
+/* 320 * 240 * 16bpp for the SPI DMA staging buffer */
+#define DMA_BUFFER_SIZE (SCREEN_WIDTH * SCREEN_HEIGHT * 2)
+#define DMA_BUFFER_ALIGNMENT 4096
+
+/* The BCM2711's general-purpose DMA channels use 32-byte control blocks.
+ * Use page alignment for the CB storage so no control block straddles a
+ * page boundary when we translate logical -> physical addresses. */
+#define DMA_CB_ALIGNMENT 4096
+#define DMA_MAX_EXTENTS ((DMA_BUFFER_SIZE / 4096) + 8)
+/* Splitting the frame into SPI DLEN-sized transfers can split an extent at
+ * each chunk boundary, requiring one additional control block per stream. */
+#define DMA_CB_SIZE 32
+/* We use the very end of the control block page for the extra word to write at the start of each transfer */
+#define DMA_MAX_CONTROL_BLOCKS 127 // was ((DMA_MAX_EXTENTS * 2) + 32)
+#define DMA_TX_CHANNEL 6
+#define DMA_RX_CHANNEL 7
+
+extern void (*barrier_W)(void);
+extern void (*barrier_R)(void);
+extern void (*cache_clean_range)(const void *start, const void *end);
+
+typedef struct dma_extent {
+    unsigned int logical;
+    unsigned int physical;
+    unsigned int length;
+    unsigned int flags;
+} dma_extent_t;
 
 /* Small scratch buffer used for building short SPI command sequences
  * (replaces the BASIC "code%" scratchpad). */
@@ -48,16 +78,37 @@
 typedef struct hw_regs {
     void *gpio_base;
     void *spi_base;
+    void *dma_base;
 } hw_regs_t;
 
 /* Module workspace - one instance, pointed to by the module's private word */
 typedef struct spiscreen_workspace {
     hw_regs_t hw;
+    unsigned da_number;
+    unsigned da_base;
+
+    unsigned pci_physical;
+    void*    pci_logical;
+
+    unsigned cb_physical;
+    void*    cb_logical;
 
     void *spritearea;               /* single-sprite sprite area (owned buffer) */
     void *spriteptr;                /* -> sprite control block within spritearea */
-    void *dmabuffer;                /* DMA staging buffer for SPI transfer */
+//    void *dmabuffer_raw;            /* raw claim for the aligned TX staging buffer */
+    void *dmabuffer;                /* aligned DMA staging buffer for SPI transfer */
+//    void *dma_rxbuffer_raw;         /* raw claim for the aligned RX discard buffer */
+    void *dma_rxbuffer;             /* aligned RX discard buffer */
+//    void *dma_cb_raw;               /* raw claim for aligned DMA control blocks */
+//    void *dma_cb;                   /* aligned DMA control-block storage */
     int image_loaded;               /* true once *SPIScreenLoad has accepted an image */
+
+    dma_extent_t dma_tx_extents[DMA_MAX_EXTENTS];
+    dma_extent_t dma_rx_extents[DMA_MAX_EXTENTS];
+    dma_extent_t dma_cb_extents[DMA_MAX_EXTENTS];
+    int dma_tx_extent_count;
+    int dma_rx_extent_count;
+    int dma_cb_extent_count;
 
     unsigned char scratch[SCRATCH_SIZE];
 } spiscreen_ws;
