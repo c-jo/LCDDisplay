@@ -7,6 +7,7 @@
  */
 
 #include <string.h>
+#include <stdlib.h>
 #include <stdio.h>
 
 #include "kernel.h"
@@ -39,40 +40,35 @@ static _kernel_oserror *spiscreen_load(const char *arg_string, int argc, spiscre
     _kernel_swi_regs r;
     int width, height, mode;
 
-    if (arg_string[0] == '@') {
-      printf("Using exisitng image.\n");
-      return lcd_update(ws, pw);
-    }
-
     if (argc < 1 || arg_string == NULL || arg_string[0] == '\0')
         return spiscreen_make_error("Syntax: *SPIScreenLoad <sprite file>");
 
-    /* Start from a fresh, empty area sized for exactly one 320x240 16bpp
-     * sprite - if the file doesn't fit (too big, or more than one
-     * sprite's worth of data) OS_SpriteOp will report E_Overflow. */
-    spiscreen_reset_spritearea(ws);
-    ws->image_loaded = 0;
+    const char *filename = arg_string;
+    unsigned length, type;
+    e = _swix(OS_File, _INR(0,1)|_OUT(4)|_OUT(6), 23, filename, &length, &type);
+    if (e) return e;
+
+    void *sprite_area = malloc(length);
+
+    printf("Len: %d, type: %x\n", length, type);
 
     r.r[0] = SPRITEOP_LOADFILE;
-    r.r[1] = (int) ws->spritearea;
+    r.r[1] = (int) sprite_area;
     r.r[2] = (int) arg_string;
     e = _kernel_swi(OS_SpriteOp, &r, &r);
     if (e != NULL) {
-        spiscreen_reset_spritearea(ws);
         return e;
     }
 
-    if (((int *) ws->spritearea)[1] != 1) {
-        spiscreen_reset_spritearea(ws);
-        return spiscreen_make_error("Sprite file must contain exactly one sprite");
+    if (((int *) sprite_area)[1] < 1) {
+        return spiscreen_make_error("Sprite file must contain a sprite");
     }
 
     r.r[0] = SPRITEOP_READINFO;
-    r.r[1] = (int) ws->spritearea;
-    r.r[2] = r.r[1] + 16;             /* first (only) sprite in the area */
+    r.r[1] = (int) sprite_area;
+    r.r[2] = r.r[1] + 16;             /* first sprite in the area */
     e = _kernel_swi(OS_SpriteOp, &r, &r);
     if (e != NULL) {
-        spiscreen_reset_spritearea(ws);
         return e;
     }
 
@@ -80,18 +76,18 @@ static _kernel_oserror *spiscreen_load(const char *arg_string, int argc, spiscre
     height = r.r[4];
     mode   = r.r[6];
 
+    printf("%d x %d mode %x\n", width, height, mode);
+
     if (width != SCREEN_WIDTH || height != SCREEN_HEIGHT
-        /*|| mode != REQUIRED_SPRITE_MODE*/) {
-        spiscreen_reset_spritearea(ws);
+        || (mode & 0x78000000) != 0x50000000) {
         return spiscreen_make_error(
-            "Sprite must be 320x240 pixels, 16bpp");
+            "Sprite must be 320x240 pixels, 16bpp (64k)");
     }
 
     /* offset to first sprite is area word 2 (see spiscreen_reset_spritearea) */
-    ws->spriteptr = (char *) ws->spritearea + ((int *) ws->spritearea)[2];
-    ws->image_loaded = 1;
+    void *sprite_ptr = (char *) sprite_area + ((int *) sprite_area)[2];
 
-    e = lcd_build(ws, pw);
+    e = lcd_build(ws, sprite_ptr);
     if (e != NULL)
       return e;
 
@@ -99,7 +95,9 @@ static _kernel_oserror *spiscreen_load(const char *arg_string, int argc, spiscre
     if (e != NULL)
         return e;
 
-    return NULL;
+    free(sprite_area);
+
+    return e;
 }
 
 _kernel_oserror *spiscreen_command(const char *arg_string, int argc, int cmd_no, void *pw)

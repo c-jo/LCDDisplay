@@ -1,0 +1,25 @@
+#ifndef SPIDEFS_H
+#define SPIDEFS_H
+
+// SPI Registers
+#define SPI_CS_REG   0x00
+#define SPI_FIFO_REG 0x04
+#define SPI_CLK_REG  0x08
+#define SPI_DLEN_REG 0x0C
+#define SPI_DC_REG   0x14
+
+// CS Bits
+#define SPI_CS_CS       (0) // 2 bits
+#define SPI_CS_CPHA     (1u << 2)
+#define SPI_CS_CPOL     (1u << 3)
+#define SPI_CS_CLEAR_TX (1u << 4)
+#define SPI_CS_CLEAR_RX (1u << 5)
+#define SPI_CS_CSPOL    (1u << 6)
+#define SPI_CS_TA       (1u << 7)
+#define SPI_CS_DMAEN    (1u << 8)
+#define SPI_CS_DONE     (1u << 16)
+#define SPI_CS_RXD      (1u << 17)
+#define SPI_CS_TXD      (1u << 18)
+
+
+#endif

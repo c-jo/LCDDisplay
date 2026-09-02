@@ -10,7 +10,7 @@
 
 /* Send one command byte followed by the (int-per-byte, word-spaced) data
  * words in [start,end). Thin wrapper around spi_send binding in ws->hw. */
-void spiscreen_spi(spiscreen_ws *ws, int cmd, const void *start, const void *end);
+void spiscreen_spi(spiscreen_ws *ws, int cmd, const int *start, const int *end);
 
 /* Prepare the DMA-visible address information for the module's permanent
  * TX/RX/control-block buffers. */
@@ -29,8 +29,8 @@ _kernel_oserror *lcd_set_backlight(spiscreen_ws *ws, int enabled);
 /* Set the ILI9341 column/row address window - port of PROCsetWindow. */
 _kernel_oserror *lcd_set_window(spiscreen_ws *ws, int x0, int y0, int x1, int y1);
 
-/* Convert the current sprite (ws->spriteptr) into the DMA buffer. */
-_kernel_oserror *lcd_build(spiscreen_ws *ws, void *pw);
+/* Convert the current sprite into the DMA buffer. */
+_kernel_oserror *lcd_build(spiscreen_ws *ws, void *sprite_ptr);
 
 /* Stream the current DBA buffer to the panel - port of PROClcdUpdate. */
 _kernel_oserror *lcd_update(spiscreen_ws *ws, void *pw);

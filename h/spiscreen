@@ -70,15 +70,11 @@ typedef struct dma_extent {
     unsigned int flags;
 } dma_extent_t;
 
-/* Small scratch buffer used for building short SPI command sequences
- * (replaces the BASIC "code%" scratchpad). */
-#define SCRATCH_SIZE 64
-
 /* Pair of mapped register bases, passed to the ObjAsm routines */
 typedef struct hw_regs {
-    void *gpio_base;
-    void *spi_base;
-    void *dma_base;
+    volatile uint32_t *gpio_base;
+    volatile uint32_t *spi_base;
+    volatile uint32_t *dma_base;
 } hw_regs_t;
 
 /* Module workspace - one instance, pointed to by the module's private word */
@@ -93,15 +89,8 @@ typedef struct spiscreen_workspace {
     unsigned cb_physical;
     void*    cb_logical;
 
-    void *spritearea;               /* single-sprite sprite area (owned buffer) */
-    void *spriteptr;                /* -> sprite control block within spritearea */
-//    void *dmabuffer_raw;            /* raw claim for the aligned TX staging buffer */
-    void *dmabuffer;                /* aligned DMA staging buffer for SPI transfer */
-//    void *dma_rxbuffer_raw;         /* raw claim for the aligned RX discard buffer */
-    void *dma_rxbuffer;             /* aligned RX discard buffer */
-//    void *dma_cb_raw;               /* raw claim for aligned DMA control blocks */
-//    void *dma_cb;                   /* aligned DMA control-block storage */
-    int image_loaded;               /* true once *SPIScreenLoad has accepted an image */
+    void *dma_tx_buffer;             /* DMA staging buffer for SPI transfer */
+    void *dma_rx_buffer;             /* DMA RX discard buffer */
 
     dma_extent_t dma_tx_extents[DMA_MAX_EXTENTS];
     dma_extent_t dma_rx_extents[DMA_MAX_EXTENTS];
@@ -109,8 +98,6 @@ typedef struct spiscreen_workspace {
     int dma_tx_extent_count;
     int dma_rx_extent_count;
     int dma_cb_extent_count;
-
-    unsigned char scratch[SCRATCH_SIZE];
 } spiscreen_ws;
 
 /* Shared helpers, implemented in c/gpio.c */
@@ -120,7 +107,6 @@ void spiscreen_sleep(int centiseconds);
 
 /* Implemented in c/module.c */
 extern spiscreen_ws *spiscreen_workspace;
-void spiscreen_reset_spritearea(spiscreen_ws *ws);
 
 /* Implemented in c/command.c - the *SPIScreenLoad / *SPIScreenOff /
  * *SPIScreenOn handler named by the command-keyword-table directive in

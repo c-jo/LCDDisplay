@@ -17,8 +17,8 @@
 #include "swis.h"
 #include "Global/OSMisc.h"
 
+#include "SPIDefs.h"
 #include "spiscreen.h"
-#include "asm.h"
 #include "lcd.h"
 
 #include "SPIScreenHdr.h"
@@ -31,18 +31,6 @@
 
 void (*barrier_W)(void);
 void (*barrier_R)(void);
-
-/* ARMop 17: clean a virtual address range to the Point of Coherency.
- * Called before DMA reads to flush write-back cache lines to physical RAM. */
-void (*cache_clean_range)(const void *start, const void *end);
-
-static void *align_pointer(void *ptr, unsigned int alignment)
-{
-    unsigned int value = (unsigned int) ptr;
-
-    value = (value + alignment - 1) & ~(alignment - 1);
-    return (void *) value;
-}
 
 spiscreen_ws *spiscreen_workspace = NULL;
 
@@ -89,7 +77,7 @@ static _kernel_oserror *map_registers(spiscreen_ws *ws)
     e = _kernel_swi(OS_Memory, &r, &r);
     if (e != NULL)
         return e;
-    ws->hw.gpio_base = (void *) r.r[3];
+    ws->hw.gpio_base = (volatile uint32_t *) r.r[3];
 
     r.r[0] = 13;
     r.r[1] = (int) SPI_PHYS_BASE;
@@ -97,7 +85,7 @@ static _kernel_oserror *map_registers(spiscreen_ws *ws)
     e = _kernel_swi(OS_Memory, &r, &r);
     if (e != NULL)
         return e;
-    ws->hw.spi_base = (void *) r.r[3];
+    ws->hw.spi_base = (volatile uint32_t *) r.r[3];
 
     r.r[0] = 13;
     r.r[1] = (int) DMA_PHYS_BASE;
@@ -105,24 +93,24 @@ static _kernel_oserror *map_registers(spiscreen_ws *ws)
     e = _kernel_swi(OS_Memory, &r, &r);
     if (e != NULL)
         return e;
-    ws->hw.dma_base = (void *) r.r[3];
+    ws->hw.dma_base = (volatile uint32_t *) r.r[3];
 
     return NULL;
 }
 
-/* Create a fresh, empty, single-sprite sprite area of exactly the size
- * required for one 320x240 16bpp sprite (matches the original DIM'd
- * spritearea% initialisation). */
-void spiscreen_reset_spritearea(spiscreen_ws *ws)
+_kernel_oserror *hw_init(spiscreen_ws *ws)
 {
-    int *area = (int *) ws->spritearea;
+  ws->hw.gpio_base[0] = ws->hw.gpio_base[0] & 0x249fffff | 0x24800000; // GPSEL0
+  ws->hw.gpio_base[1] = ws->hw.gpio_base[1] & 0x2fffffe4 | 0x00000024; // GPSEL1
 
-    memset(ws->spritearea, 0x00, SPRITE_AREA_SIZE);
+  ws->hw.gpio_base[0x1c/4] = 2 << 6;
+  ws->hw.gpio_base[0x28/4] = 7 << 9;
 
-    area[0] = SPRITE_AREA_SIZE;   /* total area size */
-    area[1] = 0;                  /* number of sprites */
-    area[2] = 16;                 /* offset to first sprite */
-    area[3] = 16;                 /* offset to first free word */
+  ws->hw.spi_base[SPI_CS_REG /4] = SPI_CS_CPHA | SPI_CS_CPOL |
+                                   SPI_CS_CLEAR_TX | SPI_CS_CLEAR_RX;
+  ws->hw.spi_base[SPI_CLK_REG/4] = 8;
+
+  return 0;
 }
 
 _kernel_oserror *module_init(const char *cmd_tail, int podule_base, void *pw)
@@ -142,13 +130,6 @@ _kernel_oserror *module_init(const char *cmd_tail, int podule_base, void *pw)
               MMUCReason_GetARMop + (ARMop_DMB_Read << 8), &barrier_R);
     if (e) return e;
 
-    /* ARMop 17: clean D-cache range by virtual address to PoC.
-     * Needed to flush the write-back DMA buffer to physical RAM before
-     * the DMA engine reads it. */
-    e = _swix(OS_MMUControl, _IN(0) | _OUT(0),
-              MMUCReason_GetARMop + (17 << 8), &cache_clean_range);
-    if (e) return e;
-
     e = claim_memory(sizeof(*ws), (void **) &ws);
     if (e != NULL)
         return e;
@@ -166,25 +147,20 @@ _kernel_oserror *module_init(const char *cmd_tail, int podule_base, void *pw)
                       0, -1, DA_SIZE, -1, 1<<4|1<<5|1<<7, DA_SIZE, 0, 0, "LCD Screen Data", &ws->da_number, &ws->da_base);
     if (e) return e;
 
-
-    e = claim_memory(SPRITE_AREA_SIZE, &ws->spritearea);
-    if (e != NULL)
-        goto fail;
-
 /*
     e = claim_memory(DMA_BUFFER_SIZE + DMA_BUFFER_ALIGNMENT - 1,
                      &ws->dmabuffer_raw);
     if (e != NULL)
         goto fail;
 */
-    ws->dmabuffer = (void*)ws->da_base;//align_pointer(ws->dmabuffer_raw, DMA_BUFFER_ALIGNMENT);
+    ws->dma_tx_buffer = (void*)ws->da_base;//align_pointer(ws->dmabuffer_raw, DMA_BUFFER_ALIGNMENT);
 
 /*    e = claim_memory(DMA_BUFFER_SIZE + DMA_BUFFER_ALIGNMENT - 1,
                      &ws->dma_rxbuffer_raw);
     if (e != NULL)
         goto fail;
 */
-    ws->dma_rxbuffer = (void*)(ws->da_base+320*240*2);//align_pointer(ws->dma_rxbuffer_raw, DMA_BUFFER_ALIGNMENT);
+    ws->dma_rx_buffer = (void*)(ws->da_base+320*240*2);//align_pointer(ws->dma_rxbuffer_raw, DMA_BUFFER_ALIGNMENT);
 
 /*
     e = claim_memory((DMA_MAX_CONTROL_BLOCKS * 32) + DMA_CB_ALIGNMENT - 1,
@@ -194,10 +170,14 @@ _kernel_oserror *module_init(const char *cmd_tail, int podule_base, void *pw)
 
     ws->dma_cb =  (void*)(ws->da_base+2*320*240*2);//;align_pointer(ws->dma_cb_raw, DMA_CB_ALIGNMENT);
 */
-    spiscreen_reset_spritearea(ws);
-    ws->spriteptr = (char *) ws->spritearea + 16;
 
     e = map_registers(ws);
+    if (e != NULL)
+        goto fail;
+
+    //gpio_hw_init(&ws->hw);
+
+    e = hw_init(ws);
     if (e != NULL)
         goto fail;
 
@@ -205,7 +185,6 @@ _kernel_oserror *module_init(const char *cmd_tail, int podule_base, void *pw)
     if (e != NULL)
         goto fail;
 
-    gpio_hw_init(&ws->hw);
     e = lcd_set_backlight(ws, 0);
     if (e != NULL)
         goto fail;
@@ -229,73 +208,9 @@ _kernel_oserror *module_init(const char *cmd_tail, int podule_base, void *pw)
         goto fail;
 
 
-    memset((char*)ws->spriteptr+44, 0, 320*240*2);
-/*
-    uint32_t data[16];
-    data[ 0] = 16*4;
-    data[ 1] = 0;
-    data[ 2] = ARM2VC_Tag_AllocateMemory; // Tag
-    data[ 3] = 12;           // Buffer Size
-    data[ 4] = 0;            // Tag/Response
-    data[ 5] = 1048576;      // 1MB
-    // SCREEN_WIDTH * SCREEN_HEIGHT * SCREEN_DEPTH) * 2 * // Size
-    data[ 6] = 4096;         // Alignment
-    data[ 7] = 1<<2; // || 1<<4; // MEM__FLAG_DIRECT, MEM_FLAG_ZERO
-    data[ 8] = 0;
+    //memset((char*)ws->spriteptr+44, 0, 320*240*2);
 
-    e = _swix(BCMSupport_SendTempPropertyBuffer, _INR(0,2), &data, &data, 0);
-    if (e != NULL)
-        goto fail;
-
-    if (data[1] != 0x80000000) {
-      printf("Failed to get memory.\n");
-      goto fail;
-    }
-
-    ws->memory_handle = data[5];
-    printf("Memory handle: %d\n", ws->memory_handle);
-
-    if (ws->memory_handle && !ws->memory_physical) {
-      //
-        data[ 0] = 8*4;
-        data[ 1] = 0;
-        data[ 2] = ARM2VC_Tag_LockMemory; // Tag
-        data[ 3] = 4;                     // Buffer Size
-        data[ 4] = 0;                     // Tag/Response
-        data[ 5] = ws->memory_handle;     // Handle
-        data[ 6] = 0;
-        data[ 7] = 0;
-
-        _kernel_oserror *e = _swix(BCMSupport_SendTempPropertyBuffer, _INR(0,2), &data, &data, 0);
-        if (e != NULL) {
-            printf("Error locking memory: %s\n", e->errmess);
-        } else
-        if (data[1] != 0x80000000) {
-          ws->memory_physical = 0;
-          printf("Failed to locking data memory.\n");
-        }
-        else {
-          ws->memory_physical = data[5];
-          printf("Bus addres: %08x\n", data[5]);
-        }
-    }
-
-    if (ws->memory_physical) {
-        ws->memory_logical = 0;
-        ws->memory_key     = 0;
-
-        e = _swix(OS_Memory, _INR(0,1)|_OUTR(2,3), 14,
-                             ws->memory_physical, &ws->memory_logical, &ws->memory_key);
-        if (e) {
-            printf("OS_Memory 14 failed: %s\n", e->errmess);
-        }
-        else {
-            printf("Address: %p. Key: %x\n",
-            ws->memory_logical, ws->memory_key);
-        }
-    }
-*/
-    lcd_build(ws, pw);
+    // lcd_build(ws, pw);
     lcd_update(ws, pw);
     lcd_set_backlight(ws, 0);
 
@@ -323,9 +238,6 @@ _kernel_oserror *module_final(int fatal, int podule_base, void *pw)
     _swix(PCI_RAMFree, _IN(0), ws->pci_logical);
     _swix(PCI_RAMFree, _IN(0), ws->cb_logical);
     if (ws->da_number) _swix(OS_DynamicArea, _INR(0,1), 1, ws->da_number);
-//    free_memory(ws->dma_rxbuffer_raw);
-//    free_memory(ws->dmabuffer_raw);
-    free_memory(ws->spritearea);
     free_memory(ws);
 
     spiscreen_workspace = NULL;

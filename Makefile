@@ -22,7 +22,7 @@ CFLAGS    = -c -depend !Depend -IC: -throwback -zM
 AFLAGS    = -depend !Depend -IC: -throwback -APCS 3/32bit -CloseExec
 CMHGFLAGS =
 
-OBJS = o.SPIScreenHdr o.module o.gpio o.lcd o.command o.spiasm
+OBJS = o.SPIScreenHdr o.module o.gpio o.lcd o.command
 
 all: SPIScreen
 
@@ -35,20 +35,17 @@ o.SPIScreenHdr: cmhg.SPIScreen VersionNum
 h.SPIScreenHdr: cmhg.SPIScreen VersionNum
 	$(CMHG) cmhg.SPIScreen -d h.SPIScreenHdr $(CMHGFLAGS)
 
-o.module: c.module h.spiscreen h.asm h.lcd h.SPIScreenHdr
+o.module: c.module h.spiscreen h.lcd h.SPIScreenHdr
 	$(CC) $(CFLAGS) -o o.module c.module
 
 o.gpio: c.gpio h.spiscreen
 	$(CC) $(CFLAGS) -o o.gpio c.gpio
 
-o.lcd: c.lcd h.spiscreen h.asm h.lcd h.SPIScreenHdr
+o.lcd: c.lcd h.spiscreen h.lcd h.SPIScreenHdr
 	$(CC) $(CFLAGS) -o o.lcd c.lcd
 
 o.command: c.command h.spiscreen h.lcd h.SPIScreenHdr
 	$(CC) $(CFLAGS) -o o.command c.command
-
-o.spiasm: s.spiasm
-	$(OBJASM) $(AFLAGS) s.spiasm o.spiasm
 
 clean:
 	remove o.SPIScreenHdr
@@ -64,10 +61,9 @@ o.module:	c.module
 o.module:	C:h.kernel
 o.module:	C:h.swis
 o.module:	C:Global.h.OSMisc
+o.module:	h.SPIDefs
 o.module:	h.spiscreen
 o.module:	C:h.kernel
-o.module:	h.asm
-o.module:	h.spiscreen
 o.module:	h.lcd
 o.module:	C:h.kernel
 o.module:	h.spiscreen
@@ -80,10 +76,9 @@ o.gpio:	C:h.kernel
 o.lcd:	c.lcd
 o.lcd:	C:h.kernel
 o.lcd:	C:h.swis
+o.lcd:	h.SPIDefs
 o.lcd:	h.spiscreen
 o.lcd:	C:h.kernel
-o.lcd:	h.asm
-o.lcd:	h.spiscreen
 o.lcd:	h.lcd
 o.lcd:	C:h.kernel
 o.lcd:	h.spiscreen
@@ -99,4 +94,3 @@ o.command:	h.lcd
 o.command:	C:h.kernel
 o.command:	h.spiscreen
 o.command:	h.SPIScreenHdr
-o.spiasm: s.spiasm
