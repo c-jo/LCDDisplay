@@ -1,11 +1,11 @@
-# Makefile for SPIScreen - built with the Norcroft/DDE toolchain
+# Makefile for LCDDisplay - built with the Norcroft/DDE toolchain
 # (cc, objasm, cmhg, drlink) via AMU.
 #
 # Paths below use RISC OS "." directory separators, as is conventional
 # for AMU/DDE Makefiles; source files live in the c./h./s./cmhg.
 # directories with no filename extension (the RISC OS convention),
 # e.g. c.module is the C source for the module/finalisation code,
-# h.spiscreen is its header, s.spiasm is the ObjAsm source.
+# h.lcddisplay is its header, s.spiasm is the ObjAsm source.
 #
 # This has not been build-tested against a real DDE install (this repo
 # was written in a Linux sandbox with no RISC OS toolchain available) -
@@ -22,75 +22,72 @@ CFLAGS    = -c -depend !Depend -IC: -throwback -zM
 AFLAGS    = -depend !Depend -IC: -throwback -APCS 3/32bit -CloseExec
 CMHGFLAGS =
 
-OBJS = o.SPIScreenHdr o.module o.gpio o.lcd o.command
+OBJS = o.LCDDisplayHdr o.module o.lcd o.command
 
-all: SPIScreen
+all: LCDDisplay
 
-SPIScreen: $(OBJS)
-	$(LD) -o SPIScreen -module $(OBJS) C:o.Stubs
+LCDDisplay: $(OBJS)
+	$(LD) -o LCDDisplay -module $(OBJS) C:o.Stubs
 
-o.SPIScreenHdr: cmhg.SPIScreen VersionNum
-	$(CMHG) cmhg.SPIScreen -o o.SPIScreenHdr $(CMHGFLAGS)
+o.LCDDisplayHdr: cmhg.LCDDisplay VersionNum
+	$(CMHG) cmhg.LCDDisplay -o o.LCDDisplayHdr $(CMHGFLAGS)
 
-h.SPIScreenHdr: cmhg.SPIScreen VersionNum
-	$(CMHG) cmhg.SPIScreen -d h.SPIScreenHdr $(CMHGFLAGS)
+h.LCDDisplayHdr: cmhg.LCDDisplay VersionNum
+	$(CMHG) cmhg.LCDDisplay -d h.LCDDisplayHdr $(CMHGFLAGS)
 
-o.module: c.module h.spiscreen h.lcd h.SPIScreenHdr
+o.module: c.module h.lcddisplay h.lcd h.LCDDisplayHdr
 	$(CC) $(CFLAGS) -o o.module c.module
 
-o.gpio: c.gpio h.spiscreen
-	$(CC) $(CFLAGS) -o o.gpio c.gpio
-
-o.lcd: c.lcd h.spiscreen h.lcd h.SPIScreenHdr
+o.lcd: c.lcd h.lcddisplay h.lcd h.LCDDisplayHdr
 	$(CC) $(CFLAGS) -o o.lcd c.lcd
 
-o.command: c.command h.spiscreen h.lcd h.SPIScreenHdr
+o.command: c.command h.lcddisplay h.lcd h.LCDDisplayHdr
 	$(CC) $(CFLAGS) -o o.command c.command
 
 clean:
-	remove o.SPIScreenHdr
+	remove o.LCDDisplayHdr
 	remove o.module
 	remove o.gpio
 	remove o.lcd
 	remove o.command
 	remove o.spiasm
-	remove SPIScreen
+	remove LCDDisplay
 
 # Dynamic dependencies:
+o.gpio:	c.gpio
+o.gpio:	C:h.kernel
+o.gpio:	C:h.swis
+o.gpio:	h.lcddisplay
+o.gpio:	C:h.kernel
 o.module:	c.module
 o.module:	C:h.kernel
 o.module:	C:h.swis
 o.module:	C:Global.h.OSMisc
 o.module:	h.SPIDefs
-o.module:	h.spiscreen
+o.module:	h.lcddisplay
 o.module:	C:h.kernel
 o.module:	h.lcd
 o.module:	C:h.kernel
-o.module:	h.spiscreen
-o.module:	h.SPIScreenHdr
-o.gpio:	c.gpio
-o.gpio:	C:h.kernel
-o.gpio:	C:h.swis
-o.gpio:	h.spiscreen
-o.gpio:	C:h.kernel
-o.command:	c.command
-o.command:	C:h.kernel
-o.command:	C:h.swis
-o.command:	h.spiscreen
-o.command:	C:h.kernel
-o.command:	h.lcd
-o.command:	C:h.kernel
-o.command:	h.spiscreen
-o.command:	h.SPIScreenHdr
+o.module:	h.lcddisplay
+o.module:	h.LCDDisplayHdr
 o.lcd:	c.lcd
 o.lcd:	C:h.kernel
 o.lcd:	C:h.swis
 o.lcd:	h.SPIDefs
-o.lcd:	h.spiscreen
+o.lcd:	h.lcddisplay
 o.lcd:	C:h.kernel
 o.lcd:	h.lcd
 o.lcd:	C:h.kernel
-o.lcd:	h.spiscreen
-o.lcd:	h.SPIScreenHdr
+o.lcd:	h.lcddisplay
+o.lcd:	h.LCDDisplayHdr
 o.lcd:	C:Global.h.OSMem
 o.lcd:	C:DebugLib.h.DebugLib
+o.command:	c.command
+o.command:	C:h.kernel
+o.command:	C:h.swis
+o.command:	h.lcddisplay
+o.command:	C:h.kernel
+o.command:	h.lcd
+o.command:	C:h.kernel
+o.command:	h.lcddisplay
+o.command:	h.LCDDisplayHdr

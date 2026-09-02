@@ -1,0 +1,24 @@
+; LCDDisplay.cmhg - CMHG module header.
+;
+; Defines module identity/help text, the initialisation/finalisation
+; entry points (c/module.c), and the *LCDDisplayLoad/*LCDDisplayOff/
+; *LCDDisplayOn star command surface in command.c.
+
+initialisation-code: module_init
+finalisation-code: module_final
+
+title-string: LCDDisplay
+help-string: LCDDisplay 0.25
+
+command-keyword-table: lcddisplay_command
+    LCDDisplayLoad(min-args: 1, max-args: 1,
+                  invalid-syntax: "Syntax: *LCDDisplayLoad <sprite file>",
+                  help-text: "*LCDDisplayLoad <sprite file>\n\
+Loads <sprite file> and displays it on the panel. The file must\n\
+contain a  320x240 pixels, 16bpp (64K colour) sprite."),
+    LCDDisplayOff(min-args: 0, max-args: 0,
+                 help-text: "*LCDDisplayOff\n\
+Turns the panel backlight off."),
+    LCDDisplayOn(min-args: 0, max-args: 0,
+                help-text: "*LCDDisplayOn\n\
+Turns the panel backlight on.")

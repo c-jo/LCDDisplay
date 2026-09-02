@@ -3,7 +3,7 @@
  * BASIC program (buffer allocation, GPIO/SPI register mapping, and
  * PROCinitGPIO).
  *
- * The module keeps a single, static workspace instance (spiscreen_ws) -
+ * The module keeps a single, static workspace instance (lcddisplay_ws) -
  * this mirrors the original program's single set of global variables and
  * keeps things simple, since the hardware this module drives is a single
  * physical SPI LCD; the module is not designed to be multiply
@@ -18,52 +18,20 @@
 #include "Global/OSMisc.h"
 
 #include "SPIDefs.h"
-#include "spiscreen.h"
+#include "lcddisplay.h"
 #include "lcd.h"
 
-#include "SPIScreenHdr.h"
-
-#define GPIO_WriteMode 0x58f90
-#define GPIO_WriteData 0x58f81
+#include "LCDDisplayHdr.h"
 
 void (*barrier_W)(void);
 void (*barrier_R)(void);
 
-spiscreen_ws *spiscreen_workspace = NULL;
+volatile unsigned *gpio_base;
+volatile unsigned *spi_base;
+volatile unsigned *dma_base;
 
-/* Thin wrappers around OS_Module 6/7 (Claim/Free) - used instead of
- * malloc()/free() so the module doesn't depend on the C library heap
- * being wired up for RMA use. */
-static _kernel_oserror *claim_memory(int size, void **out)
-{
-    _kernel_oserror *e;
-    _kernel_swi_regs r;
-
-    r.r[0] = 6;
-    r.r[3] = size;
-    e = _kernel_swi(OS_Module, &r, &r);
-    if (e != NULL)
-        return e;
-
-    *out = (void *) r.r[2];
-    return NULL;
-}
-
-static void free_memory(void *ptr)
-{
-    _kernel_swi_regs r;
-
-    if (ptr == NULL)
-        return;
-
-    r.r[0] = 7;
-    r.r[2] = (int) ptr;
-    (void) _kernel_swi(OS_Module, &r, &r);
-}
-
-/* Map the GPIO and SPI0 peripheral registers into the module's address
- * space, as PROCinitGPIO's "SYS OS_Memory,13,..." calls did. */
-static _kernel_oserror *map_registers(spiscreen_ws *ws)
+/* Map in the GPIO and SPI0 peripheral registers */
+static _kernel_oserror *map_registers(void)
 {
     _kernel_oserror *e;
     _kernel_swi_regs r;
@@ -74,7 +42,7 @@ static _kernel_oserror *map_registers(spiscreen_ws *ws)
     e = _kernel_swi(OS_Memory, &r, &r);
     if (e != NULL)
         return e;
-    ws->hw.gpio_base = (volatile uint32_t *) r.r[3];
+    gpio_base = (volatile uint32_t *) r.r[3];
 
     r.r[0] = 13;
     r.r[1] = (int) SPI_PHYS_BASE;
@@ -82,7 +50,7 @@ static _kernel_oserror *map_registers(spiscreen_ws *ws)
     e = _kernel_swi(OS_Memory, &r, &r);
     if (e != NULL)
         return e;
-    ws->hw.spi_base = (volatile uint32_t *) r.r[3];
+    spi_base = (volatile uint32_t *) r.r[3];
 
     r.r[0] = 13;
     r.r[1] = (int) DMA_PHYS_BASE;
@@ -90,30 +58,52 @@ static _kernel_oserror *map_registers(spiscreen_ws *ws)
     e = _kernel_swi(OS_Memory, &r, &r);
     if (e != NULL)
         return e;
-    ws->hw.dma_base = (volatile uint32_t *) r.r[3];
+    dma_base = (volatile uint32_t *) r.r[3];
 
     return NULL;
 }
 
-_kernel_oserror *hw_init(spiscreen_ws *ws)
+_kernel_oserror *hw_init(void)
 {
-  ws->hw.gpio_base[0] = ws->hw.gpio_base[0] & 0x249fffff | 0x24800000; // GPSEL0
-  ws->hw.gpio_base[1] = ws->hw.gpio_base[1] & 0x2fffffe4 | 0x00000024; // GPSEL1
+    // GPFSEL0: GPIO 7, 8, 9 -> ALT0 (SPI0)
+    gpio_base[GPIO_GPFSEL0_REG/4] =
+        gpio_base[GPIO_GPFSEL0_REG/4] & 0x249fffff | 0x24800000;
+    // GPFSEL1: GPIO 10, 11 -> ALT0 (SPI0)
+    gpio_base[GPIO_GPFSEL1_REG/4] =
+        gpio_base[GPIO_GPFSEL1_REG/4] & 0x2fffffe4 | 0x00000024;
 
-  ws->hw.gpio_base[0x1c/4] = 2 << 6;
-  ws->hw.gpio_base[0x28/4] = 7 << 9;
+    int output_pins[] = {PIN_BL, PIN_DC, PIN_RST};
+    int i;
 
-  ws->hw.spi_base[SPI_CS_REG /4] = SPI_CS_CPHA | SPI_CS_CPOL |
-                                   SPI_CS_CLEAR_TX | SPI_CS_CLEAR_RX;
-  ws->hw.spi_base[SPI_CLK_REG/4] = 8;
+    for (i = 0; i < sizeof(output_pins) / sizeof(int); ++i) {
+      int pin = output_pins[i];
+      int reg = pin / 10;
+      int shift = (pin - (reg * 10)) * 3;
+      unsigned mask = ~(7 << shift);
+      unsigned set  = 1 << shift;
 
+      gpio_base[reg] = gpio_base[reg] & mask | set;
+
+      //printf("Set pin %d as output (reg: %d shift:%d mask:%x set:%x)\n", pin, reg, shift, mask, set);
+    }
+
+    // Setup output pins
+//    lcddisplay_gpio_write_mode(PIN_BL, 1);
+    // lcddisplay_gpio_write_mode(PIN_CS, 1);
+//    lcddisplay_gpio_write_mode(PIN_DC, 1);
+//    lcddisplay_gpio_write_mode(PIN_RST, 1);
+
+    spi_base[SPI_CS_REG /4] = SPI_CS_CPHA | SPI_CS_CPOL |
+                              SPI_CS_CLEAR_TX | SPI_CS_CLEAR_RX;
+    spi_base[SPI_CLK_REG/4] = SPI_CLOCK_DIV;
+
+  barrier_W();
   return 0;
 }
 
 _kernel_oserror *module_init(const char *cmd_tail, int podule_base, void *pw)
 {
     _kernel_oserror *e;
-    spiscreen_ws *ws;
 
     (void) cmd_tail;
     (void) podule_base;
@@ -127,53 +117,28 @@ _kernel_oserror *module_init(const char *cmd_tail, int podule_base, void *pw)
               MMUCReason_GetARMop + (ARMop_DMB_Read << 8), &barrier_R);
     if (e) return e;
 
-    e = claim_memory(sizeof(*ws), (void **) &ws);
-    if (e != NULL)
-        return e;
-
-    memset(ws, 0, sizeof(*ws));
-
-    e = _swix(PCI_RAMAlloc, _INR(0,2)|_OUTR(0,1), SCREEN_WIDTH*SCREEN_HEIGHT*SCREEN_DEPTH*2, 0x1000, 0, &ws->pci_logical, &ws->pci_physical);
-
-    e = _swix(PCI_RAMAlloc, _INR(0,2)|_OUTR(0,1), DMA_MAX_CONTROL_BLOCKS*DMA_CB_SIZE, 0x1000, 0, &ws->cb_logical, &ws->cb_physical);
-
-    memset(ws->pci_logical, 0, 320*240*2);
-
-    spiscreen_workspace = ws;
-
-    e = map_registers(ws);
+    e = map_registers();
     if (e != NULL)
         goto fail;
 
-    e = hw_init(ws);
+    e = hw_init();
     if (e != NULL)
         goto fail;
 
-    e = spiscreen_dma_prepare(ws);
+    e = lcd_set_backlight(0);
+    if (e != NULL)
+      goto fail;
+
+    e = lcddisplay_dma_prepare();
     if (e != NULL)
         goto fail;
 
-    e = spiscreen_gpio_write_mode(ws, PIN_BL, 1);
-
-    e = lcd_set_backlight(ws, 0);
+    lcd_reset();
+    e = lcd_setup();
     if (e != NULL)
         goto fail;
 
-    e = spiscreen_gpio_write_mode(ws, PIN_CS, 1);
-
-    if (e == NULL)
-        e = spiscreen_gpio_write_mode(ws, PIN_DC, 1);
-    if (e == NULL)
-        e = spiscreen_gpio_write_mode(ws, PIN_RST, 1);
-    if (e != NULL)
-        goto fail;
-
-    lcd_reset(ws);
-    e = lcd_setup(ws);
-    if (e != NULL)
-        goto fail;
-
-    return lcd_show_sprite(ws, 0, pw);
+    return lcd_show_sprite(0);
 
 fail:
     // module_final(1, podule_base, pw);
@@ -182,20 +147,22 @@ fail:
 
 _kernel_oserror *module_final(int fatal, int podule_base, void *pw)
 {
-    spiscreen_ws *ws = spiscreen_workspace;
-
     (void) fatal;
     (void) podule_base;
     (void) pw;
 
-    if (ws == NULL)
-        return NULL;
-
-    _swix(PCI_RAMFree, _IN(0), ws->pci_logical);
-    _swix(PCI_RAMFree, _IN(0), ws->cb_logical);
-//    if (ws->da_number) _swix(OS_DynamicArea, _INR(0,1), 1, ws->da_number);
-    free_memory(ws);
-
-    spiscreen_workspace = NULL;
     return NULL;
+}
+
+void sleep(int centiseconds)
+{
+    _kernel_swi_regs r;
+    int target;
+
+    (void) _kernel_swi(OS_ReadMonotonicTime, &r, &r);
+    target = r.r[0] + centiseconds;
+
+    do {
+        (void) _kernel_swi(OS_ReadMonotonicTime, &r, &r);
+    } while (r.r[0] < target);
 }

@@ -21,5 +21,16 @@
 #define SPI_CS_RXD      (1u << 17)
 #define SPI_CS_TXD      (1u << 18)
 
+// GPIO Registers
+#define GPIO_GPFSEL0_REG 0x00
+#define GPIO_GPFSEL1_REG 0x04
+#define GPIO_GPFSEL2_REG 0x08
+#define GPIO_GPFSEL3_REG 0x0C
+#define GPIO_GPFSEL4_REG 0x10
+#define GPIO_GPFSEL5_REG 0x14
+#define GPIO_GPSET0_REG 0x1C
+#define GPIO_GPSET1_REG 0x20
+#define GPIO_GPCLR0_REG 0x28
+#define GPIO_GPCLR1_REG 0x2C
 
 #endif

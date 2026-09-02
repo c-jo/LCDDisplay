@@ -1,9 +1,9 @@
-#define Module_MajorVersion_CMHG 0.10
+#define Module_MajorVersion_CMHG 0.25
 #define Module_MinorVersion_CMHG
-#define Module_Date_CMHG "06 Jul 2026"
-#define Module_ApplicationDate_CMHG "06-Jul-26"
-#define Module_ComponentName_CMHG "SPIScreen"
-#define Module_ComponentPath_CMHG "SPIScreen"
-#define Module_FullVersion_CMHG "0.10"
-#define Module_HelpVersion_CMHG "0.10 (06 Jul 2026)"
-#define Module_LibraryVersionInfo "0:10"
+#define Module_Date_CMHG "04 Sep 2026"
+#define Module_ApplicationDate_CMHG "04-Sep-26"
+#define Module_ComponentName_CMHG "LCDDisplay"
+#define Module_ComponentPath_CMHG "LCDDisplay"
+#define Module_FullVersion_CMHG "0.25"
+#define Module_HelpVersion_CMHG "0.25 (04 Sep 2026)"
+#define Module_LibraryVersionInfo "0:25"

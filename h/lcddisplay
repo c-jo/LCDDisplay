@@ -1,0 +1,52 @@
+/* lcddisplay.h - shared workspace/constants for the LCDDisplay module
+ *
+ * Ported from the original BBC BASIC + inline ARM assembler prototype
+ * (source.txt). Phase 1 of the conversion keeps the register-level SPI/GPIO
+ * work in ObjAsm (see s/spiasm) and moves everything else into C.
+ */
+#ifndef LCDDISPLAY_H
+#define LCDDISPLAY_H
+
+#include "kernel.h"
+#include <stdint.h>
+
+/* Physical register bases */
+#define GPIO_PHYS_BASE   0xFE200000u
+#define SPI_PHYS_BASE    0xFE204000u
+#define SPI_BUS_BASE     0x7E204000u
+#define DMA_PHYS_BASE    0xFE007000u
+#define GPIO_SPI_MAP_SIZE 0x100
+#define DMA_MAP_SIZE      0x1000
+
+/* GPIO pin assignments (BCM numbering) */
+#define PIN_CS   8
+#define PIN_BL   18
+#define PIN_DC   25
+#define PIN_RST  27
+
+/* SPI0 clock divider */
+#define SPI_CLOCK_DIV 8
+
+/* Panel geometry */
+#define SCREEN_WIDTH  320
+#define SCREEN_HEIGHT 240
+#define SCREEN_DEPTH  2
+
+/* DMA channels */
+#define DMA_TX_CHANNEL 6
+#define DMA_RX_CHANNEL 7
+
+#define DMA_MAX_CONTROL_BLOCKS 32 // Should be plenty (famous last words)
+
+extern void (*barrier_W)(void);
+extern void (*barrier_R)(void);
+
+// Register bases
+extern volatile unsigned *gpio_base;
+extern volatile unsigned *spi_base;
+extern volatile unsigned *dma_base;
+
+// Helper functions
+void sleep(int centiseconds);
+
+#endif /* LCDDISPLAY_H */

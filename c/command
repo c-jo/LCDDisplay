@@ -1,8 +1,8 @@
-/* command.c - the *SPIScreenLoad / *SPIScreenOff / *SPIScreenOn star command
- * surface. *SPIScreenLoad loads a sprite file into a fresh single-sprite
+/* command.c - the *LCDDisplayLoad / *LCDDisplayOff / *LCDDisplayOn star command
+ * surface. *LCDDisplayLoad loads a sprite file into a fresh single-sprite
  * area and, if (and only if) it is exactly a 320x240 sprite in the
  * panel's native 16bpp mode, displays it. The backlight commands map to
- * the panel's BL GPIO, with *SPIScreenOn refusing to light a panel that
+ * the panel's BL GPIO, with *LCDDisplayOn refusing to light a panel that
  * has not yet had a real image loaded.
  */
 
@@ -13,9 +13,9 @@
 #include "kernel.h"
 #include "swis.h"
 
-#include "spiscreen.h"
+#include "lcddisplay.h"
 #include "lcd.h"
-#include "SPIScreenHdr.h"
+#include "LCDDisplayHdr.h"
 
 /* OS_SpriteOp reason codes used here (see PRM 5a-90ff):
  *   9   ReadSpriteInfo   - width/height (pixels), mask flag, mode word
@@ -23,34 +23,48 @@
  * "+512" selects the "by area pointer and pointer to sprite" register form. */
 #define SPRITEOP_READINFO  (512 + 40)
 #define SPRITEOP_LOADFILE  (512 + 10)
+#define SPRITEOP_INITAREA  (512 +  9)
 
-static _kernel_oserror spiscreen_error;
+static _kernel_oserror lcddisplay_error;
 
-static _kernel_oserror *spiscreen_make_error(const char *text)
+static _kernel_oserror *lcddisplay_make_error(const char *text)
 {
-    spiscreen_error.errnum = 0x82ec00; /* arbitrary module-local error number */
-    strncpy(spiscreen_error.errmess, text, sizeof(spiscreen_error.errmess) - 1);
-    spiscreen_error.errmess[sizeof(spiscreen_error.errmess) - 1] = '\0';
-    return &spiscreen_error;
+    lcddisplay_error.errnum = 0x82ec00; /* arbitrary module-local error number */
+    strncpy(lcddisplay_error.errmess, text, sizeof(lcddisplay_error.errmess) - 1);
+    lcddisplay_error.errmess[sizeof(lcddisplay_error.errmess) - 1] = '\0';
+    return &lcddisplay_error;
 }
 
-static _kernel_oserror *spiscreen_load(const char *arg_string, int argc, spiscreen_ws *ws, void *pw)
+static _kernel_oserror *lcddisplay_load(const char *arg_string, int argc)
 {
     _kernel_oserror *e;
     _kernel_swi_regs r;
 
     if (argc < 1 || arg_string == NULL || arg_string[0] == '\0')
-        return spiscreen_make_error("Syntax: *SPIScreenLoad <sprite file>");
+        return lcddisplay_make_error("Syntax: *LCDDisplayLoad <sprite file>");
 
     const char *filename = arg_string;
     unsigned length, type;
     e = _swix(OS_File, _INR(0,1)|_OUT(4)|_OUT(6), 23, filename, &length, &type);
     if (e) return e;
 
-    if (type != 0xff9)
-      return spiscreen_make_error("Not a Sprite file.");
+    if (type == -1)
+      return lcddisplay_make_error("File not found.");
 
-    void *sprite_area = malloc(length);
+    if (type != 0xff9)
+      return lcddisplay_make_error("Not a Sprite file.");
+
+    unsigned *sprite_area = malloc(length+4);
+    sprite_area[0] = length+4;
+    sprite_area[1] = 0;
+    sprite_area[2] = 16;
+    sprite_area[3] = 0;
+
+    r.r[0] = SPRITEOP_INITAREA;
+    r.r[1] = (int) sprite_area;
+    r.r[2] = (int) arg_string;
+    e = _kernel_swi(OS_SpriteOp, &r, &r);
+
 
     r.r[0] = SPRITEOP_LOADFILE;
     r.r[1] = (int) sprite_area;
@@ -61,7 +75,7 @@ static _kernel_oserror *spiscreen_load(const char *arg_string, int argc, spiscre
     }
 
     if (((int *) sprite_area)[1] < 1) {
-        return spiscreen_make_error("Sprite file must contain a sprite");
+        return lcddisplay_make_error("Sprite file must contain a sprite");
     }
 
     r.r[0] = SPRITEOP_READINFO;
@@ -79,44 +93,39 @@ static _kernel_oserror *spiscreen_load(const char *arg_string, int argc, spiscre
 
     if (width != SCREEN_WIDTH || height != SCREEN_HEIGHT
         || (mode & 0x78000000) != 0x50000000) {
-        return spiscreen_make_error(
+        return lcddisplay_make_error(
             "Sprite must be 320x240 pixels, 16bpp (64k)");
     }
 
     /* offset to first sprite is area word 2  */
-    void *sprite_ptr = (char *) sprite_area + ((int *) sprite_area)[2];
+    void *sprite_ptr = (char *) sprite_area + sprite_area[2];
 
-    e = lcd_show_sprite(ws, sprite_ptr, pw);
+    e = lcd_show_sprite(sprite_ptr);
     if (e != NULL)
         return e;
 
-    lcd_set_backlight(ws, 1);
+    lcd_set_backlight(1);
 
 
     free(sprite_area);
     return e;
 }
 
-_kernel_oserror *spiscreen_command(const char *arg_string, int argc, int cmd_no, void *pw)
+_kernel_oserror *lcddisplay_command(const char *arg_string, int argc, int cmd_no, void *pw)
 {
-    spiscreen_ws *ws = spiscreen_workspace;
-
     (void) pw;
 
-    if (ws == NULL)
-        return spiscreen_make_error("SPIScreen has not initialised correctly");
-
     switch (cmd_no) {
-    case CMD_SPIScreenLoad:
-        return spiscreen_load(arg_string, argc, ws, pw);
+    case CMD_LCDDisplayLoad:
+        return lcddisplay_load(arg_string, argc);
 
-    case CMD_SPIScreenOff:
-        return lcd_set_backlight(ws, 0);
+    case CMD_LCDDisplayOff:
+        return lcd_set_backlight(0);
 
-    case CMD_SPIScreenOn:
-        return lcd_set_backlight(ws, 1);
+    case CMD_LCDDisplayOn:
+        return lcd_set_backlight(1);
 
     default:
-        return spiscreen_make_error("Unknown SPIScreen command");
+        return lcddisplay_make_error("Unknown LCDDisplay command");
     }
 }
