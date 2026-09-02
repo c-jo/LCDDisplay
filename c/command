@@ -38,7 +38,6 @@ static _kernel_oserror *spiscreen_load(const char *arg_string, int argc, spiscre
 {
     _kernel_oserror *e;
     _kernel_swi_regs r;
-    int width, height, mode;
 
     if (argc < 1 || arg_string == NULL || arg_string[0] == '\0')
         return spiscreen_make_error("Syntax: *SPIScreenLoad <sprite file>");
@@ -48,9 +47,10 @@ static _kernel_oserror *spiscreen_load(const char *arg_string, int argc, spiscre
     e = _swix(OS_File, _INR(0,1)|_OUT(4)|_OUT(6), 23, filename, &length, &type);
     if (e) return e;
 
-    void *sprite_area = malloc(length);
+    if (type != 0xff9)
+      return spiscreen_make_error("Not a Sprite file.");
 
-    printf("Len: %d, type: %x\n", length, type);
+    void *sprite_area = malloc(length);
 
     r.r[0] = SPRITEOP_LOADFILE;
     r.r[1] = (int) sprite_area;
@@ -72,11 +72,10 @@ static _kernel_oserror *spiscreen_load(const char *arg_string, int argc, spiscre
         return e;
     }
 
+    int width, height, mode;
     width  = r.r[3];
     height = r.r[4];
     mode   = r.r[6];
-
-    printf("%d x %d mode %x\n", width, height, mode);
 
     if (width != SCREEN_WIDTH || height != SCREEN_HEIGHT
         || (mode & 0x78000000) != 0x50000000) {
@@ -84,19 +83,17 @@ static _kernel_oserror *spiscreen_load(const char *arg_string, int argc, spiscre
             "Sprite must be 320x240 pixels, 16bpp (64k)");
     }
 
-    /* offset to first sprite is area word 2 (see spiscreen_reset_spritearea) */
+    /* offset to first sprite is area word 2  */
     void *sprite_ptr = (char *) sprite_area + ((int *) sprite_area)[2];
 
-    e = lcd_build(ws, sprite_ptr);
-    if (e != NULL)
-      return e;
-
-    e = lcd_update(ws, pw);
+    e = lcd_show_sprite(ws, sprite_ptr, pw);
     if (e != NULL)
         return e;
 
-    free(sprite_area);
+    lcd_set_backlight(ws, 1);
 
+
+    free(sprite_area);
     return e;
 }
 

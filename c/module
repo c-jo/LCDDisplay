@@ -26,9 +26,6 @@
 #define GPIO_WriteMode 0x58f90
 #define GPIO_WriteData 0x58f81
 
-// Two DMA buffers, plus 4K for control blocks
-#define DA_SIZE ((2*320*240*2)+4096)
-
 void (*barrier_W)(void);
 void (*barrier_R)(void);
 
@@ -136,46 +133,17 @@ _kernel_oserror *module_init(const char *cmd_tail, int podule_base, void *pw)
 
     memset(ws, 0, sizeof(*ws));
 
-    e = _swix(PCI_RAMAlloc, _INR(0,2)|_OUTR(0,1), 320*240*2, 0x1000, 0, &ws->pci_logical, &ws->pci_physical);
+    e = _swix(PCI_RAMAlloc, _INR(0,2)|_OUTR(0,1), SCREEN_WIDTH*SCREEN_HEIGHT*SCREEN_DEPTH*2, 0x1000, 0, &ws->pci_logical, &ws->pci_physical);
 
     e = _swix(PCI_RAMAlloc, _INR(0,2)|_OUTR(0,1), DMA_MAX_CONTROL_BLOCKS*DMA_CB_SIZE, 0x1000, 0, &ws->cb_logical, &ws->cb_physical);
 
     memset(ws->pci_logical, 0, 320*240*2);
 
     spiscreen_workspace = ws;
-    e = _swix(OS_DynamicArea, _INR(0,8)|_OUT(1)|_OUT(3),
-                      0, -1, DA_SIZE, -1, 1<<4|1<<5|1<<7, DA_SIZE, 0, 0, "LCD Screen Data", &ws->da_number, &ws->da_base);
-    if (e) return e;
-
-/*
-    e = claim_memory(DMA_BUFFER_SIZE + DMA_BUFFER_ALIGNMENT - 1,
-                     &ws->dmabuffer_raw);
-    if (e != NULL)
-        goto fail;
-*/
-    ws->dma_tx_buffer = (void*)ws->da_base;//align_pointer(ws->dmabuffer_raw, DMA_BUFFER_ALIGNMENT);
-
-/*    e = claim_memory(DMA_BUFFER_SIZE + DMA_BUFFER_ALIGNMENT - 1,
-                     &ws->dma_rxbuffer_raw);
-    if (e != NULL)
-        goto fail;
-*/
-    ws->dma_rx_buffer = (void*)(ws->da_base+320*240*2);//align_pointer(ws->dma_rxbuffer_raw, DMA_BUFFER_ALIGNMENT);
-
-/*
-    e = claim_memory((DMA_MAX_CONTROL_BLOCKS * 32) + DMA_CB_ALIGNMENT - 1,
-                     &ws->dma_cb_raw);
-    if (e != NULL)
-        goto fail;
-
-    ws->dma_cb =  (void*)(ws->da_base+2*320*240*2);//;align_pointer(ws->dma_cb_raw, DMA_CB_ALIGNMENT);
-*/
 
     e = map_registers(ws);
     if (e != NULL)
         goto fail;
-
-    //gpio_hw_init(&ws->hw);
 
     e = hw_init(ws);
     if (e != NULL)
@@ -185,13 +153,14 @@ _kernel_oserror *module_init(const char *cmd_tail, int podule_base, void *pw)
     if (e != NULL)
         goto fail;
 
+    e = spiscreen_gpio_write_mode(ws, PIN_BL, 1);
+
     e = lcd_set_backlight(ws, 0);
     if (e != NULL)
         goto fail;
 
     e = spiscreen_gpio_write_mode(ws, PIN_CS, 1);
-//    if (e == NULL)
-//        e = spiscreen_gpio_write_data(ws, PIN_BL, 1);
+
     if (e == NULL)
         e = spiscreen_gpio_write_mode(ws, PIN_DC, 1);
     if (e == NULL)
@@ -203,21 +172,8 @@ _kernel_oserror *module_init(const char *cmd_tail, int podule_base, void *pw)
     e = lcd_setup(ws);
     if (e != NULL)
         goto fail;
-    e = lcd_set_window(ws, 0, 0, SCREEN_WIDTH - 1, SCREEN_HEIGHT - 1);
-    if (e != NULL)
-        goto fail;
 
-
-    //memset((char*)ws->spriteptr+44, 0, 320*240*2);
-
-    // lcd_build(ws, pw);
-    lcd_update(ws, pw);
-    lcd_set_backlight(ws, 0);
-
-    if (e != NULL)
-        goto fail;
-
-    return NULL;
+    return lcd_show_sprite(ws, 0, pw);
 
 fail:
     // module_final(1, podule_base, pw);
@@ -237,7 +193,7 @@ _kernel_oserror *module_final(int fatal, int podule_base, void *pw)
 
     _swix(PCI_RAMFree, _IN(0), ws->pci_logical);
     _swix(PCI_RAMFree, _IN(0), ws->cb_logical);
-    if (ws->da_number) _swix(OS_DynamicArea, _INR(0,1), 1, ws->da_number);
+//    if (ws->da_number) _swix(OS_DynamicArea, _INR(0,1), 1, ws->da_number);
     free_memory(ws);
 
     spiscreen_workspace = NULL;

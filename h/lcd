@@ -19,20 +19,16 @@ _kernel_oserror *spiscreen_dma_prepare(spiscreen_ws *ws);
 /* Panel reset sequence (GPIO pulses + delays) - port of PROClcdReset. */
 void lcd_reset(spiscreen_ws *ws);
 
-/* Send the ILI9341 initialisation command table and turn the display on -
- * port of PROClcdSetup/PROClcdSendInitData. */
+/* Send the ILI9341 initialisation command table (including the fixed
+ * 0..319/0..239 CASET/RASET address window - PROCsetWindow's values are
+ * now part of this table since the window never changes) and turn the
+ * display on - port of PROClcdSetup/PROClcdSendInitData. */
 _kernel_oserror *lcd_setup(spiscreen_ws *ws);
 
 /* Drive the panel backlight GPIO high/low. */
 _kernel_oserror *lcd_set_backlight(spiscreen_ws *ws, int enabled);
 
-/* Set the ILI9341 column/row address window - port of PROCsetWindow. */
-_kernel_oserror *lcd_set_window(spiscreen_ws *ws, int x0, int y0, int x1, int y1);
-
-/* Convert the current sprite into the DMA buffer. */
-_kernel_oserror *lcd_build(spiscreen_ws *ws, void *sprite_ptr);
-
-/* Stream the current DBA buffer to the panel - port of PROClcdUpdate. */
-_kernel_oserror *lcd_update(spiscreen_ws *ws, void *pw);
+/* Convert the sprite into the DMA buffer and stream it to the panel. */
+_kernel_oserror *lcd_show_sprite(spiscreen_ws *ws, void *sprite_ptr, void *pw);
 
 #endif /* SPISCREEN_LCD_H */

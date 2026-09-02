@@ -70,6 +70,7 @@
 #define DMA_FRAME_SIZE_BYTES DMA_BUFFER_SIZE
 #define DMA_SPI_MAX_TRANSFER 65532u
 #define DMA_SPI_MAX_CHUNKS 8
+#define DMA_CB_MAX_TRANSFER 0xFFFFu /* DMA control block txfr_len limit (64k) */
 
 #define DMA_SPI_CHUNK_COUNT \
     ((DMA_FRAME_SIZE_BYTES + DMA_SPI_MAX_TRANSFER - 1) / DMA_SPI_MAX_TRANSFER)
@@ -286,7 +287,7 @@ static _kernel_oserror *dma_finish_regions(bool write,
 }
 
 static int dma_build_chain(spiscreen_ws *ws, dma_control_block_t *cb,
-                           dma_extent_t *extents, int extent_count,
+                           unsigned int physical_address,
                            unsigned int offset, unsigned int length,
                            unsigned int transfer_info,
                            unsigned int fifo_address, int is_tx,
@@ -295,29 +296,20 @@ static int dma_build_chain(spiscreen_ws *ws, dma_control_block_t *cb,
     int i;
     int count = 0;
     unsigned int remaining = length;
+    unsigned int current_offset = offset;
 
-    for (i = 0; i < extent_count; i++) {
-        unsigned int extent_offset;
-        unsigned int transfer_length;
+    while (remaining > 0) {
+        unsigned int transfer_length = remaining;
+        if (transfer_length > DMA_CB_MAX_TRANSFER)
+            transfer_length = DMA_CB_MAX_TRANSFER;
 
-        if (offset >= extents[i].length) {
-            offset -= extents[i].length;
-            continue;
-        }
-
-        extent_offset = offset;
-        transfer_length = extents[i].length - extent_offset;
-        if (transfer_length > remaining)
-            transfer_length = remaining;
-
-        printf("dma_build_chain cb:%p count:%d\n", (void*)cb, count);
         cb[count].transfer_info = transfer_info;
         if (is_tx) {
-            cb[count].source_ad = 0xc0000000 + extents[i].physical + extent_offset;
+            cb[count].source_ad = 0xc0000000 + physical_address + current_offset;
             cb[count].dest_ad   = fifo_address;
         } else {
             cb[count].source_ad = fifo_address;
-            cb[count].dest_ad   = 0xc0000000 + extents[i].physical + extent_offset;
+            cb[count].dest_ad   = 0xc0000000 + physical_address + current_offset;
         }
         cb[count].txfr_len = transfer_length;
         cb[count].stride = 0;
@@ -326,22 +318,15 @@ static int dma_build_chain(spiscreen_ws *ws, dma_control_block_t *cb,
 
         printf("  %d bytes from %p to %p\n", cb[count].txfr_len, (void*)cb[count].source_ad, (void*)cb[count].dest_ad);
 
+        current_offset += transfer_length;
         remaining -= transfer_length;
         count++;
-        offset = 0;
-        if (remaining == 0)
-            break;
     }
 
-    if (remaining != 0)
-        return 0;
-
     for (i = 0; i < count; i++) {
-        if (i + 1 < count) {
-            cb[i].nextconbk = ws->cb_physical + DMA_CB_SIZE*(i+1);
-        } else {
-            cb[i].nextconbk = 0;
-        }
+        cb[i].nextconbk = (i + 1 < count)
+                         ? dma_control_block_phys(ws, &cb[i + 1])
+                         : 0;
     }
 
     *control_block_count = count;
@@ -392,33 +377,18 @@ static _kernel_oserror *dma_prepare_frame_buffers(spiscreen_ws *ws,
                                                   dma_frame_transfer_t *transfer,
                                                   void *pw)
 {
-    _kernel_oserror *e;
-
-    transfer->tx_regions[0].address = (unsigned int) ws->dma_tx_buffer;
-    transfer->tx_regions[0].length = DMA_FRAME_SIZE_BYTES;
-    transfer->rx_regions[0].address = (unsigned int) ws->dma_rx_buffer;
-    transfer->rx_regions[0].length = DMA_FRAME_SIZE_BYTES;
-
-    e = dma_collect_extents(false, transfer->tx_regions, 1, ws->dma_tx_extents,
-                            &ws->dma_tx_extent_count, DMA_MAX_EXTENTS, pw);
-    if (e != NULL)
-        return e;
-
-    e = dma_collect_extents(true, transfer->rx_regions, 1, ws->dma_rx_extents,
-                            &ws->dma_rx_extent_count, DMA_MAX_EXTENTS, pw);
-    if (e != NULL) {
-        (void) dma_finish_regions(false, transfer->tx_regions, 1, pw);
-        return e;
-    }
-
     ws->dma_tx_extents[0].logical  = (unsigned)ws->pci_logical;
-    ws->dma_tx_extents[0].physical = ws->pci_physical; // ws->pci_physical;
+    ws->dma_tx_extents[0].physical = ws->pci_physical;
     ws->dma_tx_extents[0].length   = 320*240*2;
     ws->dma_tx_extents[0].flags    = 0;
     ws->dma_tx_extent_count = 1;
 
-    //printf("DMA extents: TX:%d RX:%d\n",
-    //       ws->dma_tx_extent_count, ws->dma_rx_extent_count);
+    ws->dma_rx_extents[0].logical  = (unsigned)ws->pci_logical + 320*240*2;
+    ws->dma_rx_extents[0].physical = ws->pci_physical + 320*240*2;
+    ws->dma_rx_extents[0].length   = 320*240*2;
+    ws->dma_rx_extents[0].flags    = 0;
+    ws->dma_rx_extent_count = 1;
+
     return NULL;
 }
 
@@ -495,15 +465,13 @@ static _kernel_oserror *dma_build_frame_control_blocks(
         transfer->tx_cb_offsets[transfer->chunk_count] =
             transfer->control_block_count;
 
-        if (!dma_build_chain(ws,
-                             transfer->cb + transfer->control_block_count,
-                             ws->dma_tx_extents, ws->dma_tx_extent_count,
+        if (!dma_build_chain(ws, transfer->cb + transfer->control_block_count,
+                             ws->dma_tx_extents[0].physical,
                              transfer_offset, transfer_length, transfer->tx_info,
                              SPI_BUS_BASE + SPI_FIFO_REG, 1, &tx_cb_count)
-            || !dma_build_chain(ws,
-                                transfer->cb + transfer->control_block_count
+            || !dma_build_chain(ws, transfer->cb + transfer->control_block_count
                                              + tx_cb_count,
-                                ws->dma_rx_extents, ws->dma_rx_extent_count,
+                                ws->dma_rx_extents[0].physical,
                                 transfer_offset, transfer_length, transfer->rx_info,
                                 SPI_BUS_BASE + SPI_FIFO_REG, 0, &rx_cb_count))
             return spiscreen_make_lcd_error(
@@ -537,9 +505,6 @@ static _kernel_oserror *dma_run_chunk(spiscreen_ws *ws,
     int rx_cb_count;
     unsigned int first_tx_cb_phys;
     unsigned int first_rx_cb_phys;
-    unsigned int spi_cs;
-    int timed_out = 0;
-    int timeout;
 
     tx_cb_count = transfer->rx_cb_offsets[chunk_index]
                 - transfer->tx_cb_offsets[chunk_index];
@@ -562,10 +527,10 @@ static _kernel_oserror *dma_run_chunk(spiscreen_ws *ws,
             "DMA control blocks moved during preparation");
 
 
-    spi[SPI_CS_REG / 4] &= ~SPI_CS_TA;
-    spi[SPI_CS_REG / 4] |= SPI_CS_CLEAR_TX | SPI_CS_CLEAR_RX | SPI_CS_DMAEN;
-    spi[SPI_DC_REG / 4] = SPI_DMA_THRESHOLDS;
-    spi[SPI_DLEN_REG / 4] = transfer->transfer_lengths[chunk_index];
+    spi[SPI_CS_REG   / 4] &= ~SPI_CS_TA;
+    spi[SPI_CS_REG   / 4] |= SPI_CS_CLEAR_TX | SPI_CS_CLEAR_RX | SPI_CS_DMAEN;
+    spi[SPI_DC_REG   / 4]  = SPI_DMA_THRESHOLDS;
+    spi[SPI_DLEN_REG / 4]  = transfer->transfer_lengths[chunk_index];
 
     dma_reset_channel(ws, DMA_TX_CHANNEL);
     dma_reset_channel(ws, DMA_RX_CHANNEL);
@@ -573,15 +538,15 @@ static _kernel_oserror *dma_run_chunk(spiscreen_ws *ws,
     tx_regs[DMA_REG_CONBLK_AD / 4] = first_tx_cb_phys;
     rx_regs[DMA_REG_CONBLK_AD / 4] = first_rx_cb_phys;
 
-    tx_regs[DMA_REG_DEBUG / 4] = DMA_DEBUG_CLEAR;
-    tx_regs[DMA_REG_CS / 4]   |= DMA_CS_END | DMA_CS_ERROR;
-    tx_regs[DMA_REG_CS / 4]   |= DMA_PRIORITY | DMA_PANIC_PRIORITY |
-                                 DMA_CS_WAIT_FOR_OUTSTANDING_WRITES;
+    tx_regs[DMA_REG_DEBUG / 4]  = DMA_DEBUG_CLEAR;
+    tx_regs[DMA_REG_CS    / 4] |= DMA_CS_END | DMA_CS_ERROR;
+    tx_regs[DMA_REG_CS    / 4] |= DMA_PRIORITY | DMA_PANIC_PRIORITY |
+                                  DMA_CS_WAIT_FOR_OUTSTANDING_WRITES;
 
-    rx_regs[DMA_REG_DEBUG / 4] = DMA_DEBUG_CLEAR;
-    rx_regs[DMA_REG_CS / 4]   |= DMA_CS_END | DMA_CS_ERROR;
-    rx_regs[DMA_REG_CS / 4]   |= DMA_PRIORITY | DMA_PANIC_PRIORITY |
-                                 DMA_CS_WAIT_FOR_OUTSTANDING_WRITES;
+    rx_regs[DMA_REG_DEBUG / 4]  = DMA_DEBUG_CLEAR;
+    rx_regs[DMA_REG_CS    / 4] |= DMA_CS_END | DMA_CS_ERROR;
+    rx_regs[DMA_REG_CS    / 4] |= DMA_PRIORITY | DMA_PANIC_PRIORITY |
+                                  DMA_CS_WAIT_FOR_OUTSTANDING_WRITES;
 
     dma_log_transfer_status(ws, spi, tx_regs, rx_regs);
 
@@ -590,13 +555,14 @@ static _kernel_oserror *dma_run_chunk(spiscreen_ws *ws,
     tx_regs[DMA_REG_CS / 4] |= DMA_CS_ACTIVE;
     rx_regs[DMA_REG_CS / 4] |= DMA_CS_ACTIVE;
 
-    timeout = _swi(OS_ReadMonotonicTime, _RETURN(0)) + 25;
+    bool timed_out = false;
+    unsigned timeout = _swi(OS_ReadMonotonicTime, _RETURN(0)) + 25;
 
     while ((tx_regs[DMA_REG_CS / 4] & DMA_CS_END) == 0
            || (rx_regs[DMA_REG_CS / 4] & DMA_CS_END) == 0
            || (spi[SPI_CS_REG / 4] & SPI_CS_DONE) == 0) {
         if (_swi(OS_ReadMonotonicTime, _RETURN(0)) >= timeout) {
-            timed_out = 1;
+            timed_out = true;
             break;
         }
     }
@@ -622,7 +588,7 @@ static _kernel_oserror *dma_run_frame_transfer(spiscreen_ws *ws, void *pw)
 {
     dma_frame_transfer_t transfer;
     volatile unsigned int *spi = (volatile unsigned int *) ws->hw.spi_base;
-    volatile unsigned int *dma = (volatile unsigned int *) ws->hw.dma_base;
+//    volatile unsigned int *dma = (volatile unsigned int *) ws->hw.dma_base;
     _kernel_oserror *e;
     int chunk_index;
 
@@ -671,7 +637,7 @@ static _kernel_oserror *dma_run_frame_transfer(spiscreen_ws *ws, void *pw)
 
 _kernel_oserror *spiscreen_dma_prepare(spiscreen_ws *ws)
 {
-    memset(ws->dma_tx_buffer, 0x00, DMA_BUFFER_SIZE);
+//    memset(ws->dma_tx_buffer, 0x00, DMA_BUFFER_SIZE);
     memset(ws->cb_logical, 0x00, DMA_MAX_CONTROL_BLOCKS * DMA_CB_SIZE);
 
     dma_reset_channel(ws, DMA_TX_CHANNEL);
@@ -693,8 +659,8 @@ static const lcd_init_cmd_t lcd_init_table[] = {
     { 0x36, 1,  { MADCTL_MY | MADCTL_MV | MADCTL_BGR } }, // MADCTL
     { 0x3A, 1,  { COLMOD_65K_RGB | COLMOD_16BPP } }, // COLMOD
     // { 0x31, 0,  { 0 } },
-    { 0x2A, 4,  { 0x00, 0x00, 0x01, 0x3F } }, // CASET
-    { 0x2B, 4,  { 0x00, 0x00, 0x00, 0xEF } }, // RASET
+    { 0x2A, 4,  { 0x00, 0x00, 0x01, 0x3F } }, // CASET: 0..319 column window
+    { 0x2B, 4,  { 0x00, 0x00, 0x00, 0xEF } }, // RASET: 0..239 row window
     { 0xB2, 5,  { 0x0C, 0x0C, 0x00, 0x33, 0x33 } }, // PORCH
     { 0xB7, 1,  { 0x35 } }, // GCTRL
     { 0xBB, 1,  { 0x1F } }, // VCOMS
@@ -801,46 +767,17 @@ _kernel_oserror *lcd_set_backlight(spiscreen_ws *ws, int enabled)
     return spiscreen_gpio_write_data(ws, PIN_BL, enabled != 0);
 }
 
-_kernel_oserror *lcd_set_window(spiscreen_ws *ws, int x0, int y0, int x1, int y1)
+_kernel_oserror *lcd_show_sprite(spiscreen_ws *ws, void *sprite_ptr, void *pw)
 {
-    int scratch[4];
+    uint16_t *t = (uint16_t*)ws->pci_logical;
+    uint16_t *s = sprite_ptr ? (uint16_t*)sprite_ptr + 22 /* 44 bytes*/ : 0;
 
-    /* Column and page address set commands. */
-    scratch[0] = (x0 >> 8) & 0xFF;
-    scratch[1] = x0 & 0xFF;
-    scratch[2] = (x1 >> 8) & 0xFF;
-    scratch[3] = x1 & 0xFF;
-    spiscreen_spi(ws, 0x2A, scratch, scratch + 4);
-
-    scratch[0] = (y0 >> 8) & 0xFF;
-    scratch[1] = y0 & 0xFF;
-    scratch[2] = (y1 >> 8) & 0xFF;
-    scratch[3] = y1 & 0xFF;
-    spiscreen_spi(ws, 0x2B, scratch, scratch + 4);
-
-    return NULL;
-}
-
-_kernel_oserror *lcd_build(spiscreen_ws *ws, void *sprite_ptr)
-{
-    const char *src = (char*)sprite_ptr + 44;
-    unsigned char *dma = (unsigned char *) ws->pci_logical; // ws->dmabuffer;
-    printf("lcd_build dest:%p\n", dma);
-
-    uint16_t *t = (uint16_t*)dma;
-    uint16_t *s = (uint16_t*)src;
     int i;
-
     for (i = 0; i < DMA_BUFFER_SIZE / 2; ++i) {
-        // Swap bytes for endianness
-        t[i] = (s[i] & 0x00ff) << 8 | (s[i] & 0xff00) >> 8;
+        // Swap bytes for endianness, or set to zero
+        t[i] = s ? (s[i] & 0x00ff) << 8 | (s[i] & 0xff00) >> 8 : 0x0000;
     }
 
-    return 0;
-}
-
-_kernel_oserror *lcd_update(spiscreen_ws *ws, void *pw)
-{
     spiscreen_spi(ws, 0x2c, 0, 0); // RAMWR
     return dma_run_frame_transfer(ws, pw);
 }

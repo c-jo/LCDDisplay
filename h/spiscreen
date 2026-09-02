@@ -32,12 +32,6 @@
 #define SCREEN_HEIGHT 240
 #define SCREEN_DEPTH  2
 
-/* Sprite mode word required for a directly-displayable sprite: 16bpp,
- * new-style mode word, as produced by the original DIM'd sprite
- * (mode &78A04001 in source.txt). Sprites loaded via the star command
- * must match this exactly or they are rejected. */
-#define REQUIRED_SPRITE_MODE 0x78A04001
-
 /* 320 * 240 * 16bpp pixel data + 44 byte sprite header + 16 byte area header
  * = 153660, round up  */
 #define SPRITE_AREA_SIZE 163840
@@ -55,7 +49,8 @@
  * each chunk boundary, requiring one additional control block per stream. */
 #define DMA_CB_SIZE 32
 /* We use the very end of the control block page for the extra word to write at the start of each transfer */
-#define DMA_MAX_CONTROL_BLOCKS 127 // was ((DMA_MAX_EXTENTS * 2) + 32)
+
+#define DMA_MAX_CONTROL_BLOCKS 32 // Should be plenty (famous last words)
 #define DMA_TX_CHANNEL 6
 #define DMA_RX_CHANNEL 7
 
@@ -77,20 +72,23 @@ typedef struct hw_regs {
     volatile uint32_t *dma_base;
 } hw_regs_t;
 
+typedef struct buffers {
+  struct {
+        void    *logical;
+        uint32_t physical;
+        size_t   size;
+    } tx, rx, cb;
+} buffers_t;
+
 /* Module workspace - one instance, pointed to by the module's private word */
 typedef struct spiscreen_workspace {
     hw_regs_t hw;
-    unsigned da_number;
-    unsigned da_base;
 
     unsigned pci_physical;
     void*    pci_logical;
 
     unsigned cb_physical;
     void*    cb_logical;
-
-    void *dma_tx_buffer;             /* DMA staging buffer for SPI transfer */
-    void *dma_rx_buffer;             /* DMA RX discard buffer */
 
     dma_extent_t dma_tx_extents[DMA_MAX_EXTENTS];
     dma_extent_t dma_rx_extents[DMA_MAX_EXTENTS];
@@ -107,10 +105,5 @@ void spiscreen_sleep(int centiseconds);
 
 /* Implemented in c/module.c */
 extern spiscreen_ws *spiscreen_workspace;
-
-/* Implemented in c/command.c - the *SPIScreenLoad / *SPIScreenOff /
- * *SPIScreenOn handler named by the command-keyword-table directive in
- * cmhg/SPIScreen */
-_kernel_oserror *spiscreen_command(const char *arg_string, int argc, int cmd_no, void *pw);
 
 #endif /* SPISCREEN_H */
