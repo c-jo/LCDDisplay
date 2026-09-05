@@ -104,11 +104,44 @@ static _kernel_oserror *lcddisplay_load(const char *arg_string, int argc)
     if (e != NULL)
         return e;
 
-    lcd_set_backlight(1);
-
+    lcd_set_backlight(100);
 
     free(sprite_area);
     return e;
+}
+
+static _kernel_oserror *lcddisplay_on(const char *arg_string, int argc)
+{
+    int brightness = 100;
+
+    if (argc > 0 && arg_string != NULL) {
+        while (*arg_string == ' ')
+            arg_string++;
+
+        if (*arg_string > ' ') {
+            char *endptr;
+            long val = strtol(arg_string, &endptr, 10);
+            if (endptr == arg_string) {
+                return lcddisplay_make_error("Syntax: *LCDDisplayOn [<brightness>]");
+            }
+            while (*endptr == ' ')
+                endptr++;
+            if (*endptr == '%') {
+                endptr++;
+                while (*endptr == ' ')
+                    endptr++;
+            }
+            if (*endptr > ' ') {
+                return lcddisplay_make_error("Syntax: *LCDDisplayOn [<brightness>]");
+            }
+            if (val < 0 || val > 100) {
+                return lcddisplay_make_error("Brightness must be between 0 and 100");
+            }
+            brightness = (int) val;
+        }
+    }
+
+    return lcd_set_backlight(brightness);
 }
 
 _kernel_oserror *lcddisplay_command(const char *arg_string, int argc, int cmd_no, void *pw)
@@ -123,7 +156,7 @@ _kernel_oserror *lcddisplay_command(const char *arg_string, int argc, int cmd_no
         return lcd_set_backlight(0);
 
     case CMD_LCDDisplayOn:
-        return lcd_set_backlight(1);
+        return lcddisplay_on(arg_string, argc);
 
     default:
         return lcddisplay_make_error("Unknown LCDDisplay command");

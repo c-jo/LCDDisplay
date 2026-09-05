@@ -33,4 +33,32 @@
 #define GPIO_GPCLR0_REG 0x28
 #define GPIO_GPCLR1_REG 0x2C
 
+// PWM Registers
+#define PWM_CTL_REG  0x00
+#define PWM_STA_REG  0x04
+#define PWM_DMAC_REG 0x08
+#define PWM_RNG1_REG 0x10
+#define PWM_DAT1_REG 0x14
+#define PWM_FIF1_REG 0x18
+#define PWM_RNG2_REG 0x20
+#define PWM_DAT2_REG 0x24
+
+// PWM CTL Bits
+#define PWM_CTL_PWEN1   (1u << 0)
+#define PWM_CTL_MODE1   (1u << 1)
+#define PWM_CTL_RPTL1   (1u << 2)
+#define PWM_CTL_SBIT1   (1u << 3)
+#define PWM_CTL_POLA1   (1u << 4)
+#define PWM_CTL_USEF1   (1u << 5)
+#define PWM_CTL_CLRF1   (1u << 6)
+#define PWM_CTL_MSEN1   (1u << 7)
+#define PWM_CTL_PWEN2   (1u << 8)
+
+// Clock Manager Registers (PWM Clock)
+#define CM_PWMCTL_REG   0xA0
+#define CM_PWMDIV_REG   0xA4
+#define CM_PASSWD       0x5A000000u
+#define CM_SRC_OSC      1u
+#define CM_ENAB         (1u << 4)
+
 #endif

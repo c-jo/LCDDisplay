@@ -29,8 +29,10 @@ void (*barrier_R)(void);
 volatile unsigned *gpio_base;
 volatile unsigned *spi_base;
 volatile unsigned *dma_base;
+volatile unsigned *pwm_base;
+volatile unsigned *clk_base;
 
-/* Map in the GPIO and SPI0 peripheral registers */
+/* Map in the GPIO, SPI0, DMA, PWM, and Clock Manager peripheral registers */
 static _kernel_oserror *map_registers(void)
 {
     _kernel_oserror *e;
@@ -60,6 +62,22 @@ static _kernel_oserror *map_registers(void)
         return e;
     dma_base = (volatile uint32_t *) r.r[3];
 
+    r.r[0] = 13;
+    r.r[1] = (int) PWM_PHYS_BASE;
+    r.r[2] = PWM_MAP_SIZE;
+    e = _kernel_swi(OS_Memory, &r, &r);
+    if (e != NULL)
+        return e;
+    pwm_base = (volatile uint32_t *) r.r[3];
+
+    r.r[0] = 13;
+    r.r[1] = (int) CLK_PHYS_BASE;
+    r.r[2] = CLK_MAP_SIZE;
+    e = _kernel_swi(OS_Memory, &r, &r);
+    if (e != NULL)
+        return e;
+    clk_base = (volatile uint32_t *) r.r[3];
+
     return NULL;
 }
 
@@ -67,38 +85,57 @@ _kernel_oserror *hw_init(void)
 {
     // GPFSEL0: GPIO 7, 8, 9 -> ALT0 (SPI0)
     gpio_base[GPIO_GPFSEL0_REG/4] =
-        gpio_base[GPIO_GPFSEL0_REG/4] & 0x249fffff | 0x24800000;
-    // GPFSEL1: GPIO 10, 11 -> ALT0 (SPI0)
-    gpio_base[GPIO_GPFSEL1_REG/4] =
-        gpio_base[GPIO_GPFSEL1_REG/4] & 0x2fffffe4 | 0x00000024;
+        (gpio_base[GPIO_GPFSEL0_REG/4]
+            & ~((7 << 21) | (7 << 24) | (7 << 27)))
+            |   (4 << 21) | (4 << 24) | (4 << 27);
 
-    int output_pins[] = {PIN_BL, PIN_DC, PIN_RST};
+    // GPFSEL1: GPIO 10, 11      -> ALT0 (SPI0)
+    //          GPIO 18 (PIN_BL) -> ALT5 (PWM0)
+    gpio_base[GPIO_GPFSEL1_REG/4] =
+        (gpio_base[GPIO_GPFSEL1_REG/4]
+            & ~((7 << 0) | (7 << 3) | (7 << 24)))
+            |   (4 << 0) | (4 << 3) | (2 << 24);
+
+    int output_pins[] = {PIN_DC, PIN_RST};
     int i;
 
     for (i = 0; i < sizeof(output_pins) / sizeof(int); ++i) {
       int pin = output_pins[i];
       int reg = pin / 10;
       int shift = (pin - (reg * 10)) * 3;
-      unsigned mask = ~(7 << shift);
-      unsigned set  = 1 << shift;
 
-      gpio_base[reg] = gpio_base[reg] & mask | set;
-
-      //printf("Set pin %d as output (reg: %d shift:%d mask:%x set:%x)\n", pin, reg, shift, mask, set);
+      gpio_base[reg] = (gpio_base[reg] & ~(7 << shift)) | (1 << shift);
     }
-
-    // Setup output pins
-//    lcddisplay_gpio_write_mode(PIN_BL, 1);
-    // lcddisplay_gpio_write_mode(PIN_CS, 1);
-//    lcddisplay_gpio_write_mode(PIN_DC, 1);
-//    lcddisplay_gpio_write_mode(PIN_RST, 1);
 
     spi_base[SPI_CS_REG /4] = SPI_CS_CPHA | SPI_CS_CPOL |
                               SPI_CS_CLEAR_TX | SPI_CS_CLEAR_RX;
     spi_base[SPI_CLK_REG/4] = SPI_CLOCK_DIV;
 
-  barrier_W();
-  return 0;
+    // Setup PWM clock: stop PWM, set divider (19.2MHz / 32 = 600kHz), enable clock
+    pwm_base[PWM_CTL_REG/4] = 0;
+    barrier_W();
+
+    clk_base[CM_PWMCTL_REG/4] = CM_PASSWD | CM_SRC_OSC;
+    barrier_W();
+    sleep(1);
+
+    clk_base[CM_PWMDIV_REG/4] = CM_PASSWD | (32 << 12);
+    barrier_W();
+
+    clk_base[CM_PWMCTL_REG/4] = CM_PASSWD | CM_SRC_OSC | CM_ENAB;
+    barrier_W();
+    sleep(1);
+
+    // Setup PWM: range 100 (for 0..100% duty cycle), initial data 0
+    pwm_base[PWM_RNG1_REG/4] = 100;
+    pwm_base[PWM_DAT1_REG/4] = 0;
+    barrier_W();
+
+    // Enable PWM channel 1 in Mark-Space mode
+    pwm_base[PWM_CTL_REG/4] = PWM_CTL_PWEN1 | PWM_CTL_MSEN1;
+
+    barrier_W();
+    return 0;
 }
 
 _kernel_oserror *module_init(const char *cmd_tail, int podule_base, void *pw)
@@ -150,6 +187,12 @@ _kernel_oserror *module_final(int fatal, int podule_base, void *pw)
     (void) fatal;
     (void) podule_base;
     (void) pw;
+
+    if (pwm_base != NULL) {
+        pwm_base[PWM_DAT1_REG / 4] = 0;
+        pwm_base[PWM_CTL_REG  / 4] = 0;
+        barrier_W();
+    }
 
     return NULL;
 }

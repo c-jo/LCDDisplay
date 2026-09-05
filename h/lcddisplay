@@ -15,8 +15,12 @@
 #define SPI_PHYS_BASE    0xFE204000u
 #define SPI_BUS_BASE     0x7E204000u
 #define DMA_PHYS_BASE    0xFE007000u
+#define PWM_PHYS_BASE    0xFE20C000u
+#define CLK_PHYS_BASE    0xFE101000u
 #define GPIO_SPI_MAP_SIZE 0x100
 #define DMA_MAP_SIZE      0x1000
+#define PWM_MAP_SIZE      0x100
+#define CLK_MAP_SIZE      0x1000
 
 /* GPIO pin assignments (BCM numbering) */
 #define PIN_CS   8
@@ -45,6 +49,8 @@ extern void (*barrier_R)(void);
 extern volatile unsigned *gpio_base;
 extern volatile unsigned *spi_base;
 extern volatile unsigned *dma_base;
+extern volatile unsigned *pwm_base;
+extern volatile unsigned *clk_base;
 
 // Helper functions
 void sleep(int centiseconds);

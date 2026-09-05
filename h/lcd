@@ -25,8 +25,8 @@ void lcd_reset(void);
  * display on - port of PROClcdSetup/PROClcdSendInitData. */
 _kernel_oserror *lcd_setup(void);
 
-/* Drive the panel backlight GPIO high/low. */
-_kernel_oserror *lcd_set_backlight(int enabled);
+/* Set the panel backlight brightness in percent (0-100). */
+_kernel_oserror *lcd_set_backlight(int brightness);
 
 /* Convert the sprite into the DMA buffer and stream it to the panel. */
 _kernel_oserror *lcd_show_sprite(void *sprite_ptr);
