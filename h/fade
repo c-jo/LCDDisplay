@@ -1,0 +1,28 @@
+/* fade.h - background backlight fading via TickerV.
+ *
+ * A fade is started by *LCDDisplayFade: the desired brightness is stored
+ * and TickerV is claimed. On each ticker event the brightness is moved one
+ * step towards the target; once reached, TickerV is released. *LCDDisplay-
+ * Brightness cancels any in-progress fade and sets the brightness
+ * immediately.
+ */
+#ifndef LCDDISPLAY_FADE_H
+#define LCDDISPLAY_FADE_H
+
+#include "kernel.h"
+
+/* Start a background fade of the backlight to the target brightness
+ * (0-100). Returns an error if a fade is already in progress.
+ * pw is the module private word, used when claiming TickerV. */
+_kernel_oserror *lcd_fade_start(int target, void *pw);
+
+/* Stop any in-progress fade (releasing TickerV). No-op if no fade is
+ * in progress. */
+void lcd_fade_cancel(void);
+
+/* TickerV handler, declared via the CMHG vector-handlers entry. Moves
+ * the brightness one step towards the fade target and releases TickerV
+ * when it is reached. Always passes the call on. */
+int tickerv_handler(_kernel_swi_regs *r, void *pw);
+
+#endif /* LCDDISPLAY_FADE_H */

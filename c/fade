@@ -1,0 +1,87 @@
+/* fade.c - background backlight fading via TickerV.
+ *
+ * fade_target holds the desired brightness while a fade is in progress,
+ * or -1 when idle; the latter lets *LCDDisplayFade detect (and reject) an
+ * attempt to run two fades at once. TickerV is claimed for the duration
+ * of the fade and released when the target is reached, when the fade is
+ * cancelled by *LCDDisplayBrightness, or when the module is finalised.
+ */
+
+#include <string.h>
+
+#include "kernel.h"
+#include "swis.h"
+
+#include "lcddisplay.h"
+#include "lcd.h"
+#include "fade.h"
+#include "LCDDisplayHdr.h"
+
+/* TickerV vector number (called every centisecond from the ticker
+ * interrupt chain). */
+#define TICKERV 0x1C
+
+static int   fade_target = -1; /* -1 = no fade in progress */
+static void *fade_pw;          /* private word TickerV was claimed with */
+
+static _kernel_oserror fade_error;
+
+static _kernel_oserror *fade_make_error(const char *text)
+{
+    fade_error.errnum = 0x82ec02; /* module-local error number */
+    strncpy(fade_error.errmess, text, sizeof(fade_error.errmess) - 1);
+    fade_error.errmess[sizeof(fade_error.errmess) - 1] = '\0';
+    return &fade_error;
+}
+
+_kernel_oserror *lcd_fade_start(int target, void *pw)
+{
+    _kernel_oserror *e;
+
+    if (fade_target >= 0)
+        return fade_make_error("A backlight fade is already in progress");
+
+    fade_pw = pw;
+    fade_target = target;
+
+    e = _swix(OS_Claim, _INR(0,2), TICKERV, tickerv_entry, pw);
+    if (e != NULL) {
+        fade_target = -1;
+        return e;
+    }
+    return NULL;
+}
+
+void lcd_fade_cancel(void)
+{
+    if (fade_target < 0)
+        return;
+
+    fade_target = -1;
+    (void) _swix(OS_Release, _INR(0,2), TICKERV, tickerv_entry, fade_pw);
+}
+
+int tickerv_handler(_kernel_swi_regs *r, void *pw)
+{
+    int current;
+
+    (void) r;
+    (void) pw;
+
+    if (fade_target < 0)
+        return 0;
+
+    current = lcd_get_backlight();
+    if (current < fade_target)
+        current++;
+    else if (current > fade_target)
+        current--;
+    (void) lcd_set_backlight(current);
+
+    if (current == fade_target) {
+        fade_target = -1;
+        (void) _swix(OS_Release, _INR(0,2), TICKERV, tickerv_entry, fade_pw);
+    }
+
+    return 0; /* pass the call on to other TickerV claimants */
+}
