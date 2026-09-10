@@ -28,6 +28,13 @@ _kernel_oserror *lcd_setup(void);
 /* Set the panel backlight brightness in percent (0-100). */
 _kernel_oserror *lcd_set_backlight(int brightness);
 
+/* The current backlight brightness, as last set by lcd_set_backlight(). */
+int lcd_get_backlight(void);
+
+/* Start/stop the PWM that drives the panel backlight. */
+_kernel_oserror *lcd_backlight_start(void);
+_kernel_oserror *lcd_backlight_stop(void);
+
 /* Convert the sprite into the DMA buffer and stream it to the panel. */
 _kernel_oserror *lcd_show_sprite(void *sprite_ptr);
 

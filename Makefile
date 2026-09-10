@@ -22,7 +22,7 @@ CFLAGS    = -c -depend !Depend -IC: -throwback -zM
 AFLAGS    = -depend !Depend -IC: -throwback -APCS 3/32bit -CloseExec
 CMHGFLAGS =
 
-OBJS = o.LCDDisplayHdr o.module o.lcd o.command
+OBJS = o.LCDDisplayHdr o.module o.lcd o.command o.fade
 
 all: LCDDisplay
 
@@ -35,14 +35,17 @@ o.LCDDisplayHdr: cmhg.LCDDisplay VersionNum
 h.LCDDisplayHdr: cmhg.LCDDisplay VersionNum
 	$(CMHG) cmhg.LCDDisplay -d h.LCDDisplayHdr $(CMHGFLAGS)
 
-o.module: c.module h.lcddisplay h.lcd h.LCDDisplayHdr
+o.module: c.module h.lcddisplay h.lcd h.fade h.LCDDisplayHdr
 	$(CC) $(CFLAGS) -o o.module c.module
 
 o.lcd: c.lcd h.lcddisplay h.lcd h.LCDDisplayHdr
 	$(CC) $(CFLAGS) -o o.lcd c.lcd
 
-o.command: c.command h.lcddisplay h.lcd h.LCDDisplayHdr
+o.command: c.command h.lcddisplay h.lcd h.fade h.LCDDisplayHdr
 	$(CC) $(CFLAGS) -o o.command c.command
+
+o.fade: c.fade h.lcddisplay h.lcd h.fade h.LCDDisplayHdr
+	$(CC) $(CFLAGS) -o o.fade c.fade
 
 clean:
 	remove o.LCDDisplayHdr
@@ -50,6 +53,7 @@ clean:
 	remove o.gpio
 	remove o.lcd
 	remove o.command
+	remove o.fade
 	remove o.spiasm
 	remove LCDDisplay
 
@@ -59,6 +63,41 @@ o.gpio:	C:h.kernel
 o.gpio:	C:h.swis
 o.gpio:	h.lcddisplay
 o.gpio:	C:h.kernel
+o.command:	c.command
+o.command:	C:h.kernel
+o.command:	C:h.swis
+o.command:	h.lcddisplay
+o.command:	C:h.kernel
+o.command:	h.lcd
+o.command:	C:h.kernel
+o.command:	h.lcddisplay
+o.command:	h.fade
+o.command:	C:h.kernel
+o.command:	h.LCDDisplayHdr
+o.fade:	c.fade
+o.fade:	C:h.kernel
+o.fade:	C:h.swis
+o.fade:	h.lcddisplay
+o.fade:	C:h.kernel
+o.fade:	h.lcd
+o.fade:	C:h.kernel
+o.fade:	h.lcddisplay
+o.fade:	h.fade
+o.fade:	C:h.kernel
+o.fade:	h.LCDDisplayHdr
+o.module:	c.module
+o.module:	C:h.kernel
+o.module:	C:h.swis
+o.module:	C:Global.h.OSMisc
+o.module:	h.SPIDefs
+o.module:	h.lcddisplay
+o.module:	C:h.kernel
+o.module:	h.lcd
+o.module:	C:h.kernel
+o.module:	h.lcddisplay
+o.module:	h.fade
+o.module:	C:h.kernel
+o.module:	h.LCDDisplayHdr
 o.lcd:	c.lcd
 o.lcd:	C:h.kernel
 o.lcd:	C:h.swis
@@ -71,23 +110,3 @@ o.lcd:	h.lcddisplay
 o.lcd:	h.LCDDisplayHdr
 o.lcd:	C:Global.h.OSMem
 o.lcd:	C:DebugLib.h.DebugLib
-o.command:	c.command
-o.command:	C:h.kernel
-o.command:	C:h.swis
-o.command:	h.lcddisplay
-o.command:	C:h.kernel
-o.command:	h.lcd
-o.command:	C:h.kernel
-o.command:	h.lcddisplay
-o.command:	h.LCDDisplayHdr
-o.module:	c.module
-o.module:	C:h.kernel
-o.module:	C:h.swis
-o.module:	C:Global.h.OSMisc
-o.module:	h.SPIDefs
-o.module:	h.lcddisplay
-o.module:	C:h.kernel
-o.module:	h.lcd
-o.module:	C:h.kernel
-o.module:	h.lcddisplay
-o.module:	h.LCDDisplayHdr

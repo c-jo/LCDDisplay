@@ -5,7 +5,9 @@ initialisation-code: module_init
 finalisation-code: module_final
 
 title-string: LCDDisplay
-help-string: LCDDisplay 0.30
+help-string: LCDDisplay 0.35
+
+vector-handlers: tickerv_entry/tickerv_handler
 
 command-keyword-table: lcddisplay_command
     LCDDisplayLoad(min-args: 1, max-args: 1,
@@ -15,8 +17,17 @@ Loads <sprite file> and displays it on the panel. The file must\n\
 contain a 320x240 pixels, 16bpp (64K colour) sprite."),
     LCDDisplayOff(min-args: 0, max-args: 0,
                  help-text: "*LCDDisplayOff\n\
-Turns the panel backlight off."),
-    LCDDisplayOn(min-args: 0, max-args: 1,
-                invalid-syntax: "Syntax: *LCDDisplayOn [<brightness>]",
-                help-text: "*LCDDisplayOn [<brightness>]\n\
-Turns the panel backlight on, optionally setting brightness (0-100%).")
+Turns the panel backlight off (stops the backlight PWM)."),
+    LCDDisplayOn(min-args: 0, max-args: 0,
+                help-text: "*LCDDisplayOn\n\
+Turns the panel backlight on (starts the backlight PWM)."),
+    LCDDisplayBrightness(min-args: 1, max-args: 1,
+                invalid-syntax: "Syntax: *LCDDisplayBrightness <brightness>",
+                help-text: "*LCDDisplayBrightness <brightness>\n\
+Sets the panel backlight brightness (0-100%), cancelling any fade\n\
+in progress."),
+    LCDDisplayFade(min-args: 1, max-args: 1,
+                invalid-syntax: "Syntax: *LCDDisplayFade <brightness>",
+                help-text: "*LCDDisplayFade <brightness>\n\
+Fades the panel backlight to the given brightness (0-100%) in the\n\
+background, one step per centisecond.")

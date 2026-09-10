@@ -463,6 +463,11 @@ _kernel_oserror *lcd_setup(void)
     return NULL;
 }
 
+/* The current backlight brightness (duty cycle 0-100), as last set via
+ * lcd_set_backlight(). Used as the starting point for fades. -1 if never set.
+ */
+static int current_brightness = -1;
+
 _kernel_oserror *lcd_set_backlight(int brightness)
 {
     if (brightness < 0)
@@ -470,8 +475,28 @@ _kernel_oserror *lcd_set_backlight(int brightness)
     else if (brightness > 100)
         brightness = 100;
 
+    current_brightness = brightness;
     pwm_base[PWM_DAT1_REG / 4] = brightness;
-    barrier_W();
+
+    return NULL;
+}
+
+int lcd_get_backlight(void)
+{
+    return current_brightness < 0 ? 0 : current_brightness;
+}
+
+_kernel_oserror *lcd_backlight_start(void)
+{
+    /* Start the PWM. */
+    pwm_base[PWM_CTL_REG / 4] |= PWM_CTL_PWEN1;
+    return NULL;
+}
+
+_kernel_oserror *lcd_backlight_stop(void)
+{
+    /* Stop the PWM entirely. */
+    pwm_base[PWM_CTL_REG / 4] |= ~PWM_CTL_PWEN1;
     return NULL;
 }
 

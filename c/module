@@ -20,6 +20,7 @@
 #include "SPIDefs.h"
 #include "lcddisplay.h"
 #include "lcd.h"
+#include "fade.h"
 
 #include "LCDDisplayHdr.h"
 
@@ -113,28 +114,18 @@ _kernel_oserror *hw_init(void)
 
     // Setup PWM clock: stop PWM, set divider (19.2MHz / 32 = 600kHz), enable clock
     pwm_base[PWM_CTL_REG/4] = 0;
-    barrier_W();
-
     clk_base[CM_PWMCTL_REG/4] = CM_PASSWD | CM_SRC_OSC;
-    barrier_W();
     sleep(1);
 
     clk_base[CM_PWMDIV_REG/4] = CM_PASSWD | (32 << 12);
-    barrier_W();
-
     clk_base[CM_PWMCTL_REG/4] = CM_PASSWD | CM_SRC_OSC | CM_ENAB;
-    barrier_W();
     sleep(1);
 
     // Setup PWM: range 100 (for 0..100% duty cycle), initial data 0
     pwm_base[PWM_RNG1_REG/4] = 100;
     pwm_base[PWM_DAT1_REG/4] = 0;
-    barrier_W();
 
-    // Enable PWM channel 1 in Mark-Space mode
-    pwm_base[PWM_CTL_REG/4] = PWM_CTL_PWEN1 | PWM_CTL_MSEN1;
-
-    barrier_W();
+    // Leave the PWM off.
     return 0;
 }
 
@@ -187,6 +178,10 @@ _kernel_oserror *module_final(int fatal, int podule_base, void *pw)
     (void) fatal;
     (void) podule_base;
     (void) pw;
+
+    /* Release TickerV if a fade is still in progress, so no vector is
+     * left pointing at a dead module. */
+    lcd_fade_cancel();
 
     if (pwm_base != NULL) {
         pwm_base[PWM_DAT1_REG / 4] = 0;
