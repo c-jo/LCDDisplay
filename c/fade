@@ -22,7 +22,6 @@
 #define TICKERV 0x1C
 
 static int   fade_target = -1; /* -1 = no fade in progress */
-static void *fade_pw;          /* private word TickerV was claimed with */
 
 static _kernel_oserror fade_error;
 
@@ -41,7 +40,6 @@ _kernel_oserror *lcd_fade_start(int target, void *pw)
     if (fade_target >= 0)
         return fade_make_error("A backlight fade is already in progress");
 
-    fade_pw = pw;
     fade_target = target;
 
     e = _swix(OS_Claim, _INR(0,2), TICKERV, tickerv_entry, pw);
@@ -52,13 +50,13 @@ _kernel_oserror *lcd_fade_start(int target, void *pw)
     return NULL;
 }
 
-void lcd_fade_cancel(void)
+void lcd_fade_cancel(void *pw)
 {
     if (fade_target < 0)
         return;
 
     fade_target = -1;
-    (void) _swix(OS_Release, _INR(0,2), TICKERV, tickerv_entry, fade_pw);
+    (void) _swix(OS_Release, _INR(0,2), TICKERV, tickerv_entry, pw);
 }
 
 int tickerv_handler(_kernel_swi_regs *r, void *pw)
@@ -80,7 +78,7 @@ int tickerv_handler(_kernel_swi_regs *r, void *pw)
 
     if (current == fade_target) {
         fade_target = -1;
-        (void) _swix(OS_Release, _INR(0,2), TICKERV, tickerv_entry, fade_pw);
+        (void) _swix(OS_Release, _INR(0,2), TICKERV, tickerv_entry, pw);
     }
 
     return 0; /* pass the call on to other TickerV claimants */

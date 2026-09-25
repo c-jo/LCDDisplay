@@ -181,7 +181,7 @@ _kernel_oserror *module_final(int fatal, int podule_base, void *pw)
 
     /* Release TickerV if a fade is still in progress, so no vector is
      * left pointing at a dead module. */
-    lcd_fade_cancel();
+    lcd_fade_cancel(pw);
 
     if (pwm_base != NULL) {
         pwm_base[PWM_DAT1_REG / 4] = 0;

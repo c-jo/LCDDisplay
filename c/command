@@ -141,7 +141,7 @@ static _kernel_oserror *parse_brightness(const char *arg_string,
     return NULL;
 }
 
-static _kernel_oserror *lcddisplay_brightness(const char *arg_string)
+static _kernel_oserror *lcddisplay_brightness(const char *arg_string, void *pw)
 {
     _kernel_oserror *e;
     int brightness;
@@ -153,7 +153,7 @@ static _kernel_oserror *lcddisplay_brightness(const char *arg_string)
         return e;
 
     /* A direct brightness command wins over any fade in progress. */
-    lcd_fade_cancel();
+    lcd_fade_cancel(pw);
 
     return lcd_set_backlight(brightness);
 }
@@ -185,7 +185,7 @@ _kernel_oserror *lcddisplay_command(const char *arg_string, int argc, int cmd_no
         return lcd_backlight_start();
 
     case CMD_LCDDisplayBrightness:
-        return lcddisplay_brightness(arg_string);
+        return lcddisplay_brightness(arg_string, pw);
 
     case CMD_LCDDisplayFade:
         return lcddisplay_fade(arg_string, pw);
