@@ -1,4 +1,4 @@
-/* lcd.c - ILI9341 control: reset, init table, address window, and the
+/* lcd.c - ST7789 control: reset, init table, address window, and the
  * per-frame sprite -> DMA buffer -> SPI update. Ported from
  * PROClcdReset / PROClcdSetup / PROClcdSendInitData / PROCsetWindow /
  * PROClcdUpdate in source.txt.
@@ -149,6 +149,7 @@ static void dma_reset_channel(unsigned int channel){
     regs[DMA_REG_CONBLK_AD / 4] = 0;
 }
 
+#ifdef DEBUG
 static void dma_log_transfer_status(volatile unsigned int *spi,
                                     volatile unsigned int *tx_regs,
                                     volatile unsigned int *rx_regs)
@@ -167,6 +168,7 @@ static void dma_log_transfer_status(volatile unsigned int *spi,
            rx_regs[DMA_REG_TXFR_LEN / 4],
            rx_regs[DMA_REG_DEBUG / 4]);
 }
+#endif
 
 static void dma_build_control_block(dma_buffer_t *buffer,
                                     unsigned int offset, unsigned int length,
@@ -483,7 +485,7 @@ _kernel_oserror *lcd_set_backlight(int brightness)
 
 int lcd_get_backlight(void)
 {
-    return current_brightness < 0 ? 0 : current_brightness;
+    return current_brightness;
 }
 
 _kernel_oserror *lcd_backlight_start(void)
@@ -496,8 +498,13 @@ _kernel_oserror *lcd_backlight_start(void)
 _kernel_oserror *lcd_backlight_stop(void)
 {
     /* Stop the PWM entirely. */
-    pwm_base[PWM_CTL_REG / 4] |= ~PWM_CTL_PWEN1;
+    pwm_base[PWM_CTL_REG / 4] &= ~PWM_CTL_PWEN1;
     return NULL;
+}
+
+int lcd_backlight_is_on(void)
+{
+    return (pwm_base[PWM_CTL_REG / 4] & PWM_CTL_PWEN1) != 0;
 }
 
 _kernel_oserror *lcd_show_sprite(void *sprite_ptr)

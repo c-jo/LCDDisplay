@@ -19,16 +19,14 @@
 #include "LCDDisplayHdr.h"
 
 /* OS_SpriteOp reason codes used here (see PRM 5a-90ff):
- *   9   ReadSpriteInfo   - width/height (pixels), mask flag, mode word
- *   10  LoadSpriteFile   - load every sprite in a file into an area
+ * *   10  LoadSpriteFile   - load every sprite in a file into an area
  * "+512" selects the "by area pointer and pointer to sprite" register form. */
-#define SPRITEOP_READINFO  (512 + 40)
 #define SPRITEOP_LOADFILE  (512 + 10)
 #define SPRITEOP_INITAREA  (512 +  9)
 
 static _kernel_oserror lcddisplay_error;
 
-static _kernel_oserror *lcddisplay_make_error(const char *text)
+_kernel_oserror *lcddisplay_make_error(const char *text)
 {
     lcddisplay_error.errnum = 0x82ec00; /* arbitrary module-local error number */
     strncpy(lcddisplay_error.errmess, text, sizeof(lcddisplay_error.errmess) - 1);
@@ -56,6 +54,8 @@ static _kernel_oserror *lcddisplay_load(const char *arg_string, int argc)
       return lcddisplay_make_error("Not a Sprite file.");
 
     unsigned *sprite_area = malloc(length+4);
+    if (sprite_area == NULL)
+        return lcddisplay_make_error("Out of memory");
     sprite_area[0] = length+4;
     sprite_area[1] = 0;
     sprite_area[2] = 16;
@@ -65,51 +65,27 @@ static _kernel_oserror *lcddisplay_load(const char *arg_string, int argc)
     r.r[1] = (int) sprite_area;
     r.r[2] = (int) arg_string;
     e = _kernel_swi(OS_SpriteOp, &r, &r);
-
+    if (e != NULL) {
+        free(sprite_area);
+        return e;
+    }
 
     r.r[0] = SPRITEOP_LOADFILE;
     r.r[1] = (int) sprite_area;
     r.r[2] = (int) arg_string;
     e = _kernel_swi(OS_SpriteOp, &r, &r);
     if (e != NULL) {
+        free(sprite_area);
         return e;
     }
 
-    if (((int *) sprite_area)[1] < 1) {
+    if (sprite_area[1] < 1) {
+        free(sprite_area);
         return lcddisplay_make_error("Sprite file must contain a sprite");
     }
 
-    r.r[0] = SPRITEOP_READINFO;
-    r.r[1] = (int) sprite_area;
-    r.r[2] = r.r[1] + 16;             /* first sprite in the area */
-    e = _kernel_swi(OS_SpriteOp, &r, &r);
-    if (e != NULL) {
-        return e;
-    }
-
-    int width, height, mode;
-    width  = r.r[3];
-    height = r.r[4];
-    mode   = r.r[6];
-
-    if (width != SCREEN_WIDTH || height != SCREEN_HEIGHT
-        || (mode & 0x78000000) != 0x50000000) {
-        return lcddisplay_make_error(
-            "Sprite must be 320x240 pixels, 16bpp (64k)");
-    }
-
     /* offset to first sprite is area word 2  */
-    void *sprite_ptr = (char *) sprite_area + sprite_area[2];
-
-    e = lcd_show_sprite(sprite_ptr);
-    if (e != NULL)
-        return e;
-
-    if (lcd_get_backlight() == -1)
-        lcd_set_backlight(100);
-
-    lcd_backlight_start();
-
+    e = lcddisplay_set_image(sprite_area, (char *) sprite_area + sprite_area[2]);
     free(sprite_area);
     return e;
 }
@@ -152,10 +128,7 @@ static _kernel_oserror *lcddisplay_brightness(const char *arg_string, void *pw)
     if (e)
         return e;
 
-    /* A direct brightness command wins over any fade in progress. */
-    lcd_fade_cancel(pw);
-
-    return lcd_set_backlight(brightness);
+    return lcddisplay_set_brightness(brightness, pw);
 }
 
 static _kernel_oserror *lcddisplay_fade(const char *arg_string, void *pw)
@@ -169,7 +142,7 @@ static _kernel_oserror *lcddisplay_fade(const char *arg_string, void *pw)
     if (e)
         return e;
 
-    return lcd_fade_start(brightness, pw);
+    return lcddisplay_fade_to(brightness, pw);
 }
 
 _kernel_oserror *lcddisplay_command(const char *arg_string, int argc, int cmd_no, void *pw)
@@ -179,10 +152,10 @@ _kernel_oserror *lcddisplay_command(const char *arg_string, int argc, int cmd_no
         return lcddisplay_load(arg_string, argc);
 
     case CMD_LCDDisplayOff:
-        return lcd_backlight_stop();
+        return lcddisplay_backlight_control(0);
 
     case CMD_LCDDisplayOn:
-        return lcd_backlight_start();
+        return lcddisplay_backlight_control(1);
 
     case CMD_LCDDisplayBrightness:
         return lcddisplay_brightness(arg_string, pw);

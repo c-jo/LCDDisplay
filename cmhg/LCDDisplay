@@ -7,6 +7,10 @@ finalisation-code: module_final
 title-string: LCDDisplay
 help-string: LCDDisplay 0.35
 
+swi-chunk-base-number: 0x5A7C0
+swi-handler-code: lcddisplay_swi
+swi-decoding-table: LCDDisplay, SetImage, SetBrightness, GetBrightness, BacklightControl, BacklightStatus, Fade
+
 vector-handlers: tickerv_entry/tickerv_handler
 
 command-keyword-table: lcddisplay_command

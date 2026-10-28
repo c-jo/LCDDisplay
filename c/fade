@@ -70,6 +70,8 @@ int tickerv_handler(_kernel_swi_regs *r, void *pw)
         return 0;
 
     current = lcd_get_backlight();
+    if (current < 0)
+        current = 0; /* never set: fade up from off */
     if (current < fade_target)
         current++;
     else if (current > fade_target)

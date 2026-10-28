@@ -153,10 +153,6 @@ _kernel_oserror *module_init(const char *cmd_tail, int podule_base, void *pw)
     if (e != NULL)
         goto fail;
 
-    e = lcd_set_backlight(0);
-    if (e != NULL)
-      goto fail;
-
     e = lcddisplay_dma_prepare();
     if (e != NULL)
         goto fail;

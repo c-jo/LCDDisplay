@@ -52,6 +52,21 @@ extern volatile unsigned *dma_base;
 extern volatile unsigned *pwm_base;
 extern volatile unsigned *clk_base;
 
+// Build a module error (single shared buffer) from the given text
+_kernel_oserror *lcddisplay_make_error(const char *text);
+
+// Validate a sprite and display it (see c.swis)
+_kernel_oserror *lcddisplay_set_image(void *sprite_area, void *sprite_ptr);
+
+// Set the backlight brightness (0-100), cancelling any fade (see c.swis)
+_kernel_oserror *lcddisplay_set_brightness(int brightness, void *pw);
+
+// Turn the backlight off (0) or on (1) (see c.swis)
+_kernel_oserror *lcddisplay_backlight_control(int on);
+
+// Start a background fade to the given brightness (0-100) (see c.swis)
+_kernel_oserror *lcddisplay_fade_to(int brightness, void *pw);
+
 // Helper functions
 void sleep(int centiseconds);
 

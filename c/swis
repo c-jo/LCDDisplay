@@ -1,0 +1,124 @@
+/* swis.c - SWI handler: LCDDisplay_SetImage (R0 = sprite area pointer,
+ * R1 = sprite pointer) validates a sprite and displays it on the panel.
+ * LCDDisplay_SetBrightness (R0 = brightness 0-100) sets the backlight
+ * brightness, cancelling any fade in progress.
+ * LCDDisplay_GetBrightness (-> R0 = brightness 0-100) reads it back.
+ * LCDDisplay_BacklightControl (R0 = 0 off, 1 on) and
+ * LCDDisplay_BacklightStatus (-> R0 = 1 on, 0 off) control the backlight PWM.
+ * LCDDisplay_Fade (R0 = target brightness 0-100) fades the backlight in the
+ * background.
+ * The star commands in c.command call the same helpers directly.
+ */
+
+#include <stdlib.h>
+
+#include "kernel.h"
+#include "swis.h"
+
+#include "lcddisplay.h"
+#include "lcd.h"
+#include "fade.h"
+#include "LCDDisplayHdr.h"
+
+/* OS_SpriteOp 9 (ReadSpriteInfo), "+512" = by area and sprite pointer */
+#define SPRITEOP_READINFO  (512 + 40)
+
+/* Validate a sprite and display it on the panel. Shared by the
+ * *LCDDisplayLoad command and the LCDDisplay_SetImage SWI. */
+_kernel_oserror *lcddisplay_set_image(void *sprite_area, void *sprite_ptr)
+{
+    _kernel_oserror *e;
+    _kernel_swi_regs r;
+
+    if (sprite_area == NULL || sprite_ptr == NULL)
+        return lcddisplay_make_error("Bad sprite area or sprite pointer");
+
+    r.r[0] = SPRITEOP_READINFO;
+    r.r[1] = (int) sprite_area;
+    r.r[2] = (int) sprite_ptr;
+    e = _kernel_swi(OS_SpriteOp, &r, &r);
+    if (e != NULL)
+        return e;
+
+    int width = r.r[3], height = r.r[4], mode = r.r[6];
+
+    if (width != SCREEN_WIDTH || height != SCREEN_HEIGHT
+        || (mode & 0x78000000) != 0x50000000) {
+        return lcddisplay_make_error(
+            "Sprite must be 320x240 pixels, 16bpp (64k)");
+    }
+
+    /* lcd_show_sprite assumes pixels start at the 44 byte header end, so
+     * reject sprites with a palette or mask. */
+    const unsigned *hdr = (const unsigned *) sprite_ptr;
+    if (hdr[8] != 44 || hdr[9] != 44)
+        return lcddisplay_make_error("Sprite must not have a palette or mask");
+
+    e = lcd_show_sprite(sprite_ptr);
+    if (e != NULL)
+        return e;
+
+    if (lcd_get_backlight() == -1)
+        lcd_set_backlight(100);
+
+    return lcd_backlight_start();
+}
+
+_kernel_oserror *lcddisplay_set_brightness(int brightness, void *pw)
+{
+    if (brightness < 0 || brightness > 100)
+        return lcddisplay_make_error("Brightness must be between 0 and 100");
+
+    /* A direct brightness change wins over any fade in progress. */
+    lcd_fade_cancel(pw);
+
+    return lcd_set_backlight(brightness);
+}
+
+_kernel_oserror *lcddisplay_backlight_control(int on)
+{
+    if (on == 0)
+        return lcd_backlight_stop();
+    if (on == 1)
+        return lcd_backlight_start();
+    return lcddisplay_make_error("Backlight control must be 0 (off) or 1 (on)");
+}
+
+_kernel_oserror *lcddisplay_fade_to(int brightness, void *pw)
+{
+    if (brightness < 0 || brightness > 100)
+        return lcddisplay_make_error("Brightness must be between 0 and 100");
+
+    return lcd_fade_start(brightness, pw);
+}
+
+/* SWI LCDDisplay_SetImage: R0 = sprite area pointer, R1 = sprite pointer
+ * SWI LCDDisplay_SetBrightness: R0 = brightness (0-100)
+ * SWI LCDDisplay_GetBrightness: returns R0 = brightness (0-100)
+ * SWI LCDDisplay_BacklightControl: R0 = 0 (off) or 1 (on)
+ * SWI LCDDisplay_BacklightStatus: returns R0 = 1 (on) or 0 (off)
+ * SWI LCDDisplay_Fade: R0 = target brightness (0-100) */
+_kernel_oserror *lcddisplay_swi(int swi_offset, _kernel_swi_regs *r, void *pw)
+{
+    switch (swi_offset) {
+    case 0: /* LCDDisplay_SetImage */
+        return lcddisplay_set_image((void *) r->r[0], (void *) r->r[1]);
+    case 1: /* LCDDisplay_SetBrightness */
+        return lcddisplay_set_brightness(r->r[0], pw);
+    case 2: /* LCDDisplay_GetBrightness */
+        {
+            int level = lcd_get_backlight();
+            r->r[0] = level < 0 ? 0 : level; /* never set: reads as off */
+        }
+        return NULL;
+    case 3: /* LCDDisplay_BacklightControl */
+        return lcddisplay_backlight_control(r->r[0]);
+    case 4: /* LCDDisplay_BacklightStatus */
+        r->r[0] = lcd_backlight_is_on();
+        return NULL;
+    case 5: /* LCDDisplay_Fade */
+        return lcddisplay_fade_to(r->r[0], pw);
+    default:
+        return lcddisplay_make_error("LCDDisplay SWI not known");
+    }
+}

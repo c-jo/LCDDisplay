@@ -1,5 +1,5 @@
 /* lcd.h - LCD control built on top of the ObjAsm spi_send/lineblt/gpio_hw_init
- * primitives: panel reset, ILI9341 init table, address-window setup, and
+ * primitives: panel reset, ST7789 init table, address-window setup, and
  * the sprite-to-DMA-buffer frame update.
  */
 #ifndef LCDDISPLAY_LCD_H
@@ -19,7 +19,7 @@ _kernel_oserror *lcddisplay_dma_prepare(void);
 /* Panel reset sequence (GPIO pulses + delays) - port of PROClcdReset. */
 void lcd_reset(void);
 
-/* Send the ILI9341 initialisation command table (including the fixed
+/* Send the ST7789 initialisation command table (including the fixed
  * 0..319/0..239 CASET/RASET address window - PROCsetWindow's values are
  * now part of this table since the window never changes) and turn the
  * display on - port of PROClcdSetup/PROClcdSendInitData. */
@@ -28,12 +28,16 @@ _kernel_oserror *lcd_setup(void);
 /* Set the panel backlight brightness in percent (0-100). */
 _kernel_oserror *lcd_set_backlight(int brightness);
 
-/* The current backlight brightness, as last set by lcd_set_backlight(). */
+/* The current backlight brightness, as last set by lcd_set_backlight(),
+ * or -1 if it has never been set. */
 int lcd_get_backlight(void);
 
 /* Start/stop the PWM that drives the panel backlight. */
 _kernel_oserror *lcd_backlight_start(void);
 _kernel_oserror *lcd_backlight_stop(void);
+
+/* Non-zero if the backlight PWM is running. */
+int lcd_backlight_is_on(void);
 
 /* Convert the sprite into the DMA buffer and stream it to the panel. */
 _kernel_oserror *lcd_show_sprite(void *sprite_ptr);
